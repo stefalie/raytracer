@@ -127,12 +127,13 @@ const Ray = struct {
     }
 };
 
-fn rayColor(r: Ray) Color {
-    const sphere = Sphere{
-        .center = Vec3.init(0.0, 0.0, -1.0),
-        .radius = 0.5,
-    };
-    const intersection = sphere.hit(r, 0.0, 10.0);
+fn rayColor(world: *World, r: Ray) Color {
+    //const sphere = Sphere{
+    //    .center = Vec3.init(0.0, 0.0, -1.0),
+    //    .radius = 0.5,
+    //};
+    //const intersection = sphere.hit(r, 0.0, 10.0);
+    const intersection = world.hit(r, 0.0, 10.0);
     if (intersection) |hit| {
         return hit.normal.add(Vec3.ones()).mul(0.5);
     } else {
@@ -186,7 +187,32 @@ const Sphere = struct {
     }
 };
 
-pub fn main() void {
+const World = struct {
+    spheres: std.ArrayList(Sphere),
+
+    pub fn init() World {
+        return .{ .spheres = std.ArrayList(Sphere).init(gpa) };
+    }
+    pub fn deinit(self: World) void {
+        self.spheres.deinit();
+    }
+
+    pub fn hit(self: World, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
+        var result_rec: ?HitRecord = null;
+        //var closest_so_far = t_max;
+
+        for (self.spheres.items) |s| {
+            const closest_so_far = if (result_rec) |rec| rec.t else t_max;
+            if (s.hit(r, t_min, closest_so_far)) |new_rec| {
+                result_rec = new_rec;
+            }
+        }
+
+        return result_rec;
+    }
+};
+
+pub fn main() !void {
     const aspect = 16.0 / 9.0;
     const image_width = 1600;
     const image_height = @floatToInt(usize, @as(f32, image_width) / aspect);
@@ -200,6 +226,21 @@ pub fn main() void {
     const horizontal = Vec3.init(viewport_width, 0.0, 0.0);
     const vertical = Vec3.init(0.0, viewport_height, 0.0);
     const lower_left_corner = origin.sub(horizontal.mul(0.5)).sub(vertical.mul(0.5)).sub(Vec3.init(0.0, 0.0, focal_length));
+
+    var world = World.init();
+    defer world.deinit();
+    try world.spheres.append(.{
+        .center = Vec3.init(0.0, 0.0, -1.0),
+        .radius = 0.5,
+    });
+    try world.spheres.append(.{
+        .center = Vec3.init(0.5, 0.0, -1.5),
+        .radius = 0.5,
+    });
+    try world.spheres.append(.{
+        .center = Vec3.init(-0.5, 0.0, -0.5),
+        .radius = 0.5,
+    });
 
     var y: usize = 0;
     while (y < image_height) : (y += 1) {
@@ -215,7 +256,7 @@ pub fn main() void {
 
             const pixel_pos = lower_left_corner.add(horizontal.mul(u)).add(vertical.mul(v));
             const ray = Ray.init(origin, pixel_pos.sub(origin));
-            const pixel_color = rayColor(ray);
+            const pixel_color = rayColor(&world, ray);
 
             image[y][x] = RGB8.init(pixel_color);
         }
@@ -231,3 +272,6 @@ pub fn main() void {
         image_width * 3,
     );
 }
+
+var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+const gpa = general_purpose_allocator.allocator();
