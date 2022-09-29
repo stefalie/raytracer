@@ -30,98 +30,48 @@ fn clamp(x: f32, min: f32, max: f32) f32 {
     return x;
 }
 
-const Vec3 = struct {
-    x: f32,
-    y: f32,
-    z: f32,
-
-    pub fn init(x: f32, y: f32, z: f32) Vec3 {
-        return .{
-            .x = x,
-            .y = y,
-            .z = z,
-        };
-    }
-    pub fn zero() Vec3 {
-        return .{
-            .x = 0.0,
-            .y = 0.0,
-            .z = 0.0,
-        };
-    }
-    pub fn ones() Vec3 {
-        return .{
-            .x = 1.0,
-            .y = 1.0,
-            .z = 1.0,
-        };
-    }
-    pub fn neg(self: Vec3) Vec3 {
-        return .{
-            .x = -self.x,
-            .y = -self.y,
-            .z = -self.z,
-        };
-    }
-    pub fn add(self: Vec3, rhs: Vec3) Vec3 {
-        return .{
-            .x = self.x + rhs.x,
-            .y = self.y + rhs.y,
-            .z = self.z + rhs.z,
-        };
-    }
-    pub fn sub(self: Vec3, rhs: Vec3) Vec3 {
-        return self.add(rhs.neg());
-    }
-    pub fn mul(self: Vec3, t: f32) Vec3 {
-        return .{
-            .x = self.x * t,
-            .y = self.y * t,
-            .z = self.z * t,
-        };
-    }
-    pub fn div(self: Vec3, t: f32) Vec3 {
-        return self.mul(1.0 / t);
-    }
-    //pub fn mulCWise(self: Vec3, rhs: Vec3) Vec3 {
-    //    return .{
-    //        .x = self.x * rhs.x,
-    //        .y = self.y * rhs.y,
-    //        .z = self.z * rhs.z,
-    //    };
-    //}
-    //pub fn divCWise(self: Vec3, rhs: Vec3) Vec3 {
-    //    return .{
-    //        .x = self.x / rhs.x,
-    //        .y = self.y / rhs.y,
-    //        .z = self.z / rhs.z,
-    //    };
-    //}
-    pub fn dot(self: Vec3, rhs: Vec3) f32 {
-        return self.x * rhs.x + self.y * rhs.y + self.z * rhs.z;
-    }
-    pub fn cross(self: Vec3, rhs: Vec3) Vec3 {
-        return .{
-            self.y * rhs.z - rhs.y * self.z,
-            self.z * rhs.x - rhs.z * self.x,
-            self.x * rhs.y - rhs.x * self.y,
-        };
-    }
-    pub fn lengthSquared(self: Vec3) f32 {
-        return self.dot(self);
-    }
-    pub fn length(self: Vec3) f32 {
-        return @sqrt(self.lengthSquared());
-    }
-    pub fn normalized(self: Vec3) Vec3 {
-        return self.div(self.length());
-    }
-    pub fn print(self: Vec3) void {
-        std.debug.print("({}, {}, {})", .{ self.x, self.y, self.z });
-    }
-};
+// Abuse __m128 as 3D vector, allows using the usual math operators (mostly).
+const Vec3 = @Vector(4, f32);
+fn vec(x: f32, y: f32, z: f32) Vec3 {
+    return Vec3{ x, y, z, 0.0 };
+}
+fn scalar(s: f32) Vec3 {
+    return vec(s, s, s);
+}
+fn dot(lhs: Vec3, rhs: Vec3) f32 {
+    const m = lhs * rhs;
+    return m[0] + m[1] + m[2];
+    // Note that @reduce(.Add, lhs * rhs) won't work since the 4th lane can contain garbage.
+}
+fn cross(lhs: Vec3, rhs: Vec3) Vec3 {
+    return vec(
+        lhs.y * rhs.z - rhs.y * lhs.z,
+        lhs.z * rhs.x - rhs.z * lhs.x,
+        lhs.x * rhs.y - rhs.x * lhs.y,
+    );
+}
+fn lengthSquared(v: Vec3) f32 {
+    return dot(v, v);
+}
+fn length(v: Vec3) f32 {
+    return @sqrt(lengthSquared(v));
+}
+fn normalize(v: Vec3) Vec3 {
+    return v / scalar(length(v));
+}
+pub fn printVec(v: Vec3) void {
+    std.debug.print("({}, {}, {})", .{ v[0], v[1], v[2] });
+}
+const zero = scalar(0.0);
+const one = scalar(1.0);
 
 const Color = Vec3;
+const color = vec;
+const black = scalar(0.0);
+const white = scalar(1.0);
+const red = color(1.0, 0.0, 0.0);
+const green = color(0.0, 1.0, 0.0);
+const blue = color(0.0, 0.0, 1.0);
 
 const RGB8 = struct {
     r: u8,
@@ -129,11 +79,11 @@ const RGB8 = struct {
     b: u8,
 
     pub fn init(c: Color, samples_per_pixel: usize) RGB8 {
-        const scaled_c = c.div(@intToFloat(f32, samples_per_pixel));
+        const scaled_c = c / scalar(@intToFloat(f32, samples_per_pixel));
         return .{
-            .r = @floatToInt(u8, 256 * clamp(scaled_c.x, 0.0, 0.999)),
-            .g = @floatToInt(u8, 256 * clamp(scaled_c.y, 0.0, 0.999)),
-            .b = @floatToInt(u8, 256 * clamp(scaled_c.z, 0.0, 0.999)),
+            .r = @floatToInt(u8, 256.0 * clamp(scaled_c[0], 0.0, 0.999)),
+            .g = @floatToInt(u8, 256.0 * clamp(scaled_c[1], 0.0, 0.999)),
+            .b = @floatToInt(u8, 256.0 * clamp(scaled_c[2], 0.0, 0.999)),
         };
     }
 };
@@ -149,7 +99,7 @@ const Ray = struct {
         };
     }
     pub fn at(self: Ray, t: f32) Vec3 {
-        return self.origin.add(self.dir.mul(t));
+        return self.origin + scalar(t) * self.dir;
     }
 };
 
@@ -160,8 +110,8 @@ const HitRecord = struct {
     is_front_face: bool,
 
     pub fn setFaceNormal(self: *HitRecord, r: Ray, outward_normal: Vec3) void {
-        self.is_front_face = Vec3.dot(r.dir, outward_normal) < 0;
-        self.normal = if (self.is_front_face) outward_normal else outward_normal.neg();
+        self.is_front_face = dot(r.dir, outward_normal) < 0;
+        self.normal = if (self.is_front_face) outward_normal else -outward_normal;
     }
 };
 
@@ -170,10 +120,10 @@ const Sphere = struct {
     radius: f32,
 
     pub fn hit(self: Sphere, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
-        const oc = r.origin.sub(self.center);
-        const a = r.dir.lengthSquared();
-        const half_b = Vec3.dot(oc, r.dir);
-        const c = oc.lengthSquared() - self.radius * self.radius;
+        const oc = r.origin - self.center;
+        const a = lengthSquared(r.dir);
+        const half_b = dot(oc, r.dir);
+        const c = lengthSquared(oc) - self.radius * self.radius;
         const discriminant = half_b * half_b - a * c;
         if (discriminant < 0.0) {
             return null;
@@ -192,7 +142,7 @@ const Sphere = struct {
         var rec: HitRecord = undefined;
         rec.t = root;
         rec.pos = r.at(rec.t);
-        const outward_normal = rec.pos.sub(self.center).div(self.radius);
+        const outward_normal = (rec.pos - self.center) / scalar(self.radius);
         rec.setFaceNormal(r, outward_normal);
         return rec;
     }
@@ -210,7 +160,6 @@ const World = struct {
 
     pub fn hit(self: World, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
         var result_rec: ?HitRecord = null;
-        //var closest_so_far = t_max;
 
         for (self.spheres.items) |s| {
             const closest_so_far = if (result_rec) |rec| rec.t else t_max;
@@ -235,26 +184,26 @@ const Camera = struct {
         const focal_length = 1.0;
 
         var res: Camera = undefined;
-        res.origin = Vec3.zero();
-        res.horizontal = Vec3.init(viewport_width, 0.0, 0.0);
-        res.vertical = Vec3.init(0.0, viewport_height, 0.0);
-        res.lower_left_corner = res.origin.sub(res.horizontal.mul(0.5)).sub(res.vertical.mul(0.5)).sub(Vec3.init(0.0, 0.0, focal_length));
+        res.origin = zero;
+        res.horizontal = vec(viewport_width, 0.0, 0.0);
+        res.vertical = vec(0.0, viewport_height, 0.0);
+        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - vec(0.0, 0.0, focal_length);
         return res;
     }
 
     pub fn getRay(self: Camera, u: f32, v: f32) Ray {
-        const pixel_pos = self.lower_left_corner.add(self.horizontal.mul(u)).add(self.vertical.mul(v));
-        return Ray.init(self.origin, pixel_pos.sub(self.origin));
+        const pixel_pos = self.lower_left_corner + scalar(u) * self.horizontal + scalar(v) * self.vertical;
+        return Ray.init(self.origin, pixel_pos - self.origin);
     }
 };
 
 fn rayColor(world: *World, r: Ray) Color {
     const intersection = world.hit(r, 0.0, infinity);
     if (intersection) |hit| {
-        return hit.normal.add(Vec3.ones()).mul(0.5);
+        return scalar(0.5) * (hit.normal + one);
     } else {
-        const t = 0.5 * (r.dir.normalized().y + 1.0);
-        return Color.ones().mul(1.0 - t).add(Color.init(0.5, 0.7, 1.0).mul(t));
+        const t = scalar(0.5 * (normalize(r.dir)[1] + 1.0));
+        return (one - t) * white + t * color(0.5, 0.7, 1.0);
     }
 }
 
@@ -270,19 +219,19 @@ pub fn main() !void {
     var world = World.init();
     defer world.deinit();
     try world.spheres.append(.{
-        .center = Vec3.init(0.0, -100.5, -1.0),
+        .center = vec(0.0, -100.5, -1.0),
         .radius = 100.0,
     });
     try world.spheres.append(.{
-        .center = Vec3.init(0.0, 0.0, -1.0),
+        .center = vec(0.0, 0.0, -1.0),
         .radius = 0.5,
     });
     try world.spheres.append(.{
-        .center = Vec3.init(0.5, 0.0, -1.5),
+        .center = vec(0.5, 0.0, -1.5),
         .radius = 0.5,
     });
     try world.spheres.append(.{
-        .center = Vec3.init(-0.5, 0.0, -0.5),
+        .center = vec(-0.5, 0.0, -0.5),
         .radius = 0.5,
     });
 
@@ -295,14 +244,14 @@ pub fn main() !void {
 
         var x: usize = 0;
         while (x < image_width) : (x += 1) {
-            var pixel_color = Color.zero();
+            var pixel_color = zero;
 
             var i: usize = 0;
             while (i < samples_per_pixel) : (i += 1) {
                 const u = (@intToFloat(f32, x) + randFloat()) / @as(f32, image_width - 1);
                 const v = (@intToFloat(f32, y) + randFloat()) / @as(f32, image_height - 1);
                 const ray = cam.getRay(u, v);
-                pixel_color = pixel_color.add(rayColor(&world, ray));
+                pixel_color += rayColor(&world, ray);
             }
 
             image[y][x] = RGB8.init(pixel_color, samples_per_pixel);
