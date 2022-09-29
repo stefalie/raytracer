@@ -5,6 +5,31 @@ const stb = @cImport({
     @cInclude("stb_image_write.c");
 });
 
+var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+const gpa = general_purpose_allocator.allocator();
+
+var pcg = std.rand.Pcg.init(0x853c49e6748fea9b);
+
+fn deg2Rad(deg: f32) f32 {
+    return std.math.degreesToRadians(f32, deg);
+}
+const infinity = std.math.inf(f32);
+fn randFloat() f32 {
+    return pcg.random().float(f32);
+}
+fn randFloatRange(min: f32, max: f32) f32 {
+    return min + (max - min) * randFloat();
+}
+fn clamp(x: f32, min: f32, max: f32) f32 {
+    if (x < min) {
+        return min;
+    }
+    if (x > max) {
+        return max;
+    }
+    return x;
+}
+
 const Vec3 = struct {
     x: f32,
     y: f32,
@@ -103,11 +128,12 @@ const RGB8 = struct {
     g: u8,
     b: u8,
 
-    pub fn init(c: Color) RGB8 {
+    pub fn init(c: Color, samples_per_pixel: usize) RGB8 {
+        const scaled_c = c.div(@intToFloat(f32, samples_per_pixel));
         return .{
-            .r = @floatToInt(u8, 255.999 * c.x),
-            .g = @floatToInt(u8, 255.999 * c.y),
-            .b = @floatToInt(u8, 255.999 * c.z),
+            .r = @floatToInt(u8, 256 * clamp(scaled_c.x, 0.0, 0.999)),
+            .g = @floatToInt(u8, 256 * clamp(scaled_c.y, 0.0, 0.999)),
+            .b = @floatToInt(u8, 256 * clamp(scaled_c.z, 0.0, 0.999)),
         };
     }
 };
@@ -126,21 +152,6 @@ const Ray = struct {
         return self.origin.add(self.dir.mul(t));
     }
 };
-
-fn rayColor(world: *World, r: Ray) Color {
-    //const sphere = Sphere{
-    //    .center = Vec3.init(0.0, 0.0, -1.0),
-    //    .radius = 0.5,
-    //};
-    //const intersection = sphere.hit(r, 0.0, 10.0);
-    const intersection = world.hit(r, 0.0, 10.0);
-    if (intersection) |hit| {
-        return hit.normal.add(Vec3.ones()).mul(0.5);
-    } else {
-        const t = 0.5 * (r.dir.normalized().y + 1.0);
-        return Color.ones().mul(1.0 - t).add(Color.init(0.5, 0.7, 1.0).mul(t));
-    }
-}
 
 const HitRecord = struct {
     pos: Vec3,
@@ -212,23 +223,56 @@ const World = struct {
     }
 };
 
+const Camera = struct {
+    origin: Vec3,
+    lower_left_corner: Vec3,
+    horizontal: Vec3,
+    vertical: Vec3,
+
+    pub fn init(aspect_ratio: f32) Camera {
+        const viewport_height = 2.0;
+        const viewport_width = aspect_ratio * viewport_height;
+        const focal_length = 1.0;
+
+        var res: Camera = undefined;
+        res.origin = Vec3.zero();
+        res.horizontal = Vec3.init(viewport_width, 0.0, 0.0);
+        res.vertical = Vec3.init(0.0, viewport_height, 0.0);
+        res.lower_left_corner = res.origin.sub(res.horizontal.mul(0.5)).sub(res.vertical.mul(0.5)).sub(Vec3.init(0.0, 0.0, focal_length));
+        return res;
+    }
+
+    pub fn getRay(self: Camera, u: f32, v: f32) Ray {
+        const pixel_pos = self.lower_left_corner.add(self.horizontal.mul(u)).add(self.vertical.mul(v));
+        return Ray.init(self.origin, pixel_pos.sub(self.origin));
+    }
+};
+
+fn rayColor(world: *World, r: Ray) Color {
+    const intersection = world.hit(r, 0.0, infinity);
+    if (intersection) |hit| {
+        return hit.normal.add(Vec3.ones()).mul(0.5);
+    } else {
+        const t = 0.5 * (r.dir.normalized().y + 1.0);
+        return Color.ones().mul(1.0 - t).add(Color.init(0.5, 0.7, 1.0).mul(t));
+    }
+}
+
 pub fn main() !void {
-    const aspect = 16.0 / 9.0;
-    const image_width = 1600;
-    const image_height = @floatToInt(usize, @as(f32, image_width) / aspect);
+    const aspect_ratio = 16.0 / 9.0;
+    const cam = Camera.init(aspect_ratio);
+
+    const image_width = 400;
+    const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
     var image: [image_height][image_width]RGB8 = undefined;
-
-    const viewport_height = 2.0;
-    const viewport_width = aspect * viewport_height;
-    const focal_length = 1.0;
-
-    const origin = Vec3.zero();
-    const horizontal = Vec3.init(viewport_width, 0.0, 0.0);
-    const vertical = Vec3.init(0.0, viewport_height, 0.0);
-    const lower_left_corner = origin.sub(horizontal.mul(0.5)).sub(vertical.mul(0.5)).sub(Vec3.init(0.0, 0.0, focal_length));
+    const samples_per_pixel = 100;
 
     var world = World.init();
     defer world.deinit();
+    try world.spheres.append(.{
+        .center = Vec3.init(0.0, -100.5, -1.0),
+        .radius = 100.0,
+    });
     try world.spheres.append(.{
         .center = Vec3.init(0.0, 0.0, -1.0),
         .radius = 0.5,
@@ -245,20 +289,23 @@ pub fn main() !void {
     var y: usize = 0;
     while (y < image_height) : (y += 1) {
         const remaining_lines = image_height - y;
-        if (remaining_lines % 100 == 0) {
+        if (remaining_lines % 10 == 0) {
             std.debug.print("Scanlines remaining: {}\n", .{remaining_lines});
         }
 
         var x: usize = 0;
         while (x < image_width) : (x += 1) {
-            const u = @intToFloat(f32, x) / @as(f32, image_width - 1);
-            const v = @intToFloat(f32, y) / @as(f32, image_height - 1);
+            var pixel_color = Color.zero();
 
-            const pixel_pos = lower_left_corner.add(horizontal.mul(u)).add(vertical.mul(v));
-            const ray = Ray.init(origin, pixel_pos.sub(origin));
-            const pixel_color = rayColor(&world, ray);
+            var i: usize = 0;
+            while (i < samples_per_pixel) : (i += 1) {
+                const u = (@intToFloat(f32, x) + randFloat()) / @as(f32, image_width - 1);
+                const v = (@intToFloat(f32, y) + randFloat()) / @as(f32, image_height - 1);
+                const ray = cam.getRay(u, v);
+                pixel_color = pixel_color.add(rayColor(&world, ray));
+            }
 
-            image[y][x] = RGB8.init(pixel_color);
+            image[y][x] = RGB8.init(pixel_color, samples_per_pixel);
         }
     }
 
@@ -272,6 +319,3 @@ pub fn main() !void {
         image_width * 3,
     );
 }
-
-var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = general_purpose_allocator.allocator();
