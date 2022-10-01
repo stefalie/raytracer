@@ -286,15 +286,25 @@ const Metal = struct {
 const Dielectric = struct {
     refraction_index: f32,
 
-    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) Scatter {
-        const refraction_ratio = if (hit.front_face) (1.0 / self.refraction_index) else self.refraction_index;
-
+    pub fn scatter(self: Dielectric, r_in: Ray, hit: HitRecord) Scatter {
+        const refraction_ratio = if (hit.is_front_face) (1.0 / self.refraction_index) else self.refraction_index;
         const unit_dir = normalize(r_in.dir);
-        const refracted = refract(unit_dir, hit.normal, refraction_ratio);
+
+        // TODO: cos_theta is also computed inside refract(...), only do it once.
+        const cos_theta = std.math.min(dot(-unit_dir, hit.normal), 1.0);
+        const sin_theta = @sqrt(1.0 - cos_theta * cos_theta);
+        const cannot_refract = refraction_ratio * sin_theta > 1.0;
+
+        var out_dir: Vec3 = undefined;
+        if (cannot_refract) {
+            out_dir = reflect(unit_dir, hit.normal);
+        } else {
+            out_dir = refract(unit_dir, hit.normal, refraction_ratio);
+        }
         return .{
             .ray_out = Ray{
                 .origin = hit.pos,
-                .dir = refracted,
+                .dir = out_dir,
             },
             .is_scattered = true,
             .attenuation = white,
@@ -307,22 +317,10 @@ const Material = union(enum) {
     dielectric: Dielectric,
 
     pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) Scatter {
-        _ = r_in;
         return switch (self) {
             .lambertian => |l| l.scatter(r_in, hit),
             .metal => |m| m.scatter(r_in, hit),
-            //.lambertian => |l| {
-            //    const scatter_dir = hit.normal + randomUnitVector();
-            //    return .{
-            //        .ray_out = Ray{
-            //            .origin = hit.pos,
-            //            .dir = scatter_dir,
-            //        },
-            //        .is_scattered = true,
-            //        .attenuation = l.albedo, // missing 1 / pi
-            //    };
-            //},
-            else => unreachable,
+            .dielectric => |d| d.scatter(r_in, hit),
         };
     }
 };
@@ -360,13 +358,16 @@ pub fn main() !void {
         .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
     };
     const mat_center = Material{
-        .lambertian = .{ .albedo = .{ 0.7, 0.3, 0.3 } },
+        //.lambertian = .{ .albedo = .{ 0.7, 0.3, 0.3 } },
+        //.dielectric = .{ .refraction_index = 1.5 },
+        .lambertian = .{ .albedo = .{ 0.1, 0.2, 0.5 } },
     };
     const mat_left = Material{
-        .metal = .{ .albedo = .{ 0.8, 0.8, 0.8 }, .fuzz = 0.3 },
+        //.metal = .{ .albedo = .{ 0.8, 0.8, 0.8 }, .fuzz = 0.3 },
+        .dielectric = .{ .refraction_index = 1.5 },
     };
     const mat_right = Material{
-        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 1.0 },
+        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 0.0 },
     };
 
     var world = World.init();
