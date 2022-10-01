@@ -13,6 +13,7 @@ var pcg = std.rand.Pcg.init(0x853c49e6748fea9b);
 fn deg2Rad(deg: f32) f32 {
     return std.math.degreesToRadians(f32, deg);
 }
+const pi = std.math.pi;
 const infinity = std.math.inf(f32);
 fn randFloat() f32 {
     return pcg.random().float(f32);
@@ -31,17 +32,16 @@ fn clamp(x: f32, min: f32, max: f32) f32 {
 }
 
 // Abuse __m128 as 3D vector, allows using the usual math operators (mostly).
-const Vec3 = @Vector(4, f32);
+const Vec3 = @Vector(3, f32);
 fn vec(x: f32, y: f32, z: f32) Vec3 {
-    return Vec3{ x, y, z, 0.0 };
+    return Vec3{ x, y, z };
 }
 fn scalar(s: f32) Vec3 {
     return vec(s, s, s);
 }
 fn dot(lhs: Vec3, rhs: Vec3) f32 {
-    const m = lhs * rhs;
-    return m[0] + m[1] + m[2];
-    // Note that @reduce(.Add, lhs * rhs) won't work since the 4th lane can contain garbage.
+    // Note that this wouldn't work if we used @Vector(4, ...) because the 4th lane can contain garbage.
+    return @reduce(.Add, lhs * rhs);
 }
 fn cross(lhs: Vec3, rhs: Vec3) Vec3 {
     return vec(
@@ -59,9 +59,6 @@ fn length(v: Vec3) f32 {
 fn normalize(v: Vec3) Vec3 {
     return v / scalar(length(v));
 }
-pub fn printVec(v: Vec3) void {
-    std.debug.print("({}, {}, {})", .{ v[0], v[1], v[2] });
-}
 const zero = scalar(0.0);
 const one = scalar(1.0);
 
@@ -78,12 +75,13 @@ const RGB8 = struct {
     g: u8,
     b: u8,
 
-    pub fn init(c: Color, samples_per_pixel: usize) RGB8 {
-        const scaled_c = c / scalar(@intToFloat(f32, samples_per_pixel));
+    pub fn init(col: Color, samples_per_pixel: usize) RGB8 {
+        var c = col / scalar(@intToFloat(f32, samples_per_pixel));
+        c = @sqrt(c);
         return .{
-            .r = @floatToInt(u8, 256.0 * clamp(scaled_c[0], 0.0, 0.999)),
-            .g = @floatToInt(u8, 256.0 * clamp(scaled_c[1], 0.0, 0.999)),
-            .b = @floatToInt(u8, 256.0 * clamp(scaled_c[2], 0.0, 0.999)),
+            .r = @floatToInt(u8, 256.0 * clamp(c[0], 0.0, 0.999)),
+            .g = @floatToInt(u8, 256.0 * clamp(c[1], 0.0, 0.999)),
+            .b = @floatToInt(u8, 256.0 * clamp(c[2], 0.0, 0.999)),
         };
     }
 };
@@ -92,12 +90,6 @@ const Ray = struct {
     origin: Vec3,
     dir: Vec3,
 
-    pub fn init(origin: Vec3, dir: Vec3) Ray {
-        return .{
-            .origin = origin,
-            .dir = dir,
-        };
-    }
     pub fn at(self: Ray, t: f32) Vec3 {
         return self.origin + scalar(t) * self.dir;
     }
@@ -106,6 +98,7 @@ const Ray = struct {
 const HitRecord = struct {
     pos: Vec3,
     normal: Vec3,
+    material: *Material,
     t: f32,
     is_front_face: bool,
 
@@ -118,6 +111,7 @@ const HitRecord = struct {
 const Sphere = struct {
     center: Vec3,
     radius: f32,
+    material: *Material,
 
     pub fn hit(self: Sphere, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
         const oc = r.origin - self.center;
@@ -142,6 +136,7 @@ const Sphere = struct {
         var rec: HitRecord = undefined;
         rec.t = root;
         rec.pos = r.at(rec.t);
+        rec.material = self.material;
         const outward_normal = (rec.pos - self.center) / scalar(self.radius);
         rec.setFaceNormal(r, outward_normal);
         return rec;
@@ -193,14 +188,108 @@ const Camera = struct {
 
     pub fn getRay(self: Camera, u: f32, v: f32) Ray {
         const pixel_pos = self.lower_left_corner + scalar(u) * self.horizontal + scalar(v) * self.vertical;
-        return Ray.init(self.origin, pixel_pos - self.origin);
+        return Ray{
+            .origin = self.origin,
+            .dir = pixel_pos - self.origin,
+        };
     }
 };
 
-fn rayColor(world: *World, r: Ray) Color {
-    const intersection = world.hit(r, 0.0, infinity);
+// Archimedes' Hat-Box Theorem
+fn randomUnitVector() Vec3 {
+    const w_z = 2.0 * randFloat() - 1.0;
+    const r = @sqrt(1.0 - w_z * w_z);
+    const theta = 2.0 * pi * randFloat();
+    const w_x = r * @cos(theta);
+    const w_y = r * @sin(theta);
+    return vec(w_x, w_y, w_z);
+}
+
+fn randomInUnitSphere() Vec3 {
+    while (true) {
+        const p = vec(
+            randFloatRange(-1.0, 1.0),
+            randFloatRange(-1.0, 1.0),
+            randFloatRange(-1.0, 1.0),
+        );
+        if (lengthSquared(p) < 1.0) {
+            return p;
+        }
+    }
+}
+
+const Scatter = struct {
+    ray_out: Ray,
+    is_scattered: bool,
+    attenuation: Color,
+};
+
+const Lambertian = struct {
+    albedo: Vec3,
+
+    pub fn scatter(self: Lambertian, hit: HitRecord) Scatter {
+        const scatter_dir = hit.normal + randomUnitVector();
+        return .{
+            .ray_out = Ray{
+                .origin = hit.pos,
+                .dir = scatter_dir,
+            },
+            .is_scattered = true,
+            .attenuation = self.albedo, // missing 1 / pi
+        };
+    }
+};
+const Metal = struct {
+    albedo: Vec3,
+    fuzz: f32,
+};
+const Dielectric = struct {
+    refraction_index: f32,
+};
+const Material = union(enum) {
+    lambertian: Lambertian,
+    metal: Metal,
+    dielectric: Dielectric,
+
+    pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) Scatter {
+        _ = r_in;
+        return switch (self) {
+            .lambertian => |l| l.scatter(hit),
+            //.lambertian => |l| {
+            //    const scatter_dir = hit.normal + randomUnitVector();
+            //    return .{
+            //        .ray_out = Ray{
+            //            .origin = hit.pos,
+            //            .dir = scatter_dir,
+            //        },
+            //        .is_scattered = true,
+            //        .attenuation = l.albedo, // missing 1 / pi
+            //    };
+            //},
+            _ => unreachable,
+        };
+    }
+};
+
+fn rayColor(world: *World, r: Ray, depth: isize) Color {
+    if (depth <= 0) {
+        return black;
+    }
+
+    const intersection = world.hit(r, 0.001, infinity);
     if (intersection) |hit| {
-        return scalar(0.5) * (hit.normal + one);
+        // This is cosine weighted importance sampling of the direction.
+        // (See: https://twitter.com/mmalex/status/1550765798263758848)
+        // The pdf is cos(theta) / pi
+        // cos cancels the cos in the lighting equation
+        // A proper Lambertian BRDF is albeda / pi
+        // The pis in the pdf and the BRDF cancel each other.
+        const target_dir = hit.normal + randomUnitVector();
+        const lambertian_brdf = scalar(0.5);
+        return lambertian_brdf * rayColor(world, Ray{
+            .origin = hit.pos,
+            .dir = target_dir,
+        }, depth - 1);
     } else {
         const t = scalar(0.5 * (normalize(r.dir)[1] + 1.0));
         return (one - t) * white + t * color(0.5, 0.7, 1.0);
@@ -215,25 +304,28 @@ pub fn main() !void {
     const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
     var image: [image_height][image_width]RGB8 = undefined;
     const samples_per_pixel = 100;
+    const max_depth = 50;
 
     var world = World.init();
     defer world.deinit();
     try world.spheres.append(.{
         .center = vec(0.0, -100.5, -1.0),
         .radius = 100.0,
+        .material = undefined,
     });
     try world.spheres.append(.{
         .center = vec(0.0, 0.0, -1.0),
         .radius = 0.5,
+        .material = undefined,
     });
-    try world.spheres.append(.{
-        .center = vec(0.5, 0.0, -1.5),
-        .radius = 0.5,
-    });
-    try world.spheres.append(.{
-        .center = vec(-0.5, 0.0, -0.5),
-        .radius = 0.5,
-    });
+    //try world.spheres.append(.{
+    //    .center = vec(0.5, 0.0, -1.5),
+    //    .radius = 0.5,
+    //});
+    //try world.spheres.append(.{
+    //    .center = vec(-0.5, 0.0, -0.5),
+    //    .radius = 0.5,
+    //});
 
     var y: usize = 0;
     while (y < image_height) : (y += 1) {
@@ -251,7 +343,7 @@ pub fn main() !void {
                 const u = (@intToFloat(f32, x) + randFloat()) / @as(f32, image_width - 1);
                 const v = (@intToFloat(f32, y) + randFloat()) / @as(f32, image_height - 1);
                 const ray = cam.getRay(u, v);
-                pixel_color += rayColor(&world, ray);
+                pixel_color += rayColor(&world, ray, max_depth);
             }
 
             image[y][x] = RGB8.init(pixel_color, samples_per_pixel);
