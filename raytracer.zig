@@ -295,8 +295,9 @@ const Dielectric = struct {
         const sin_theta = @sqrt(1.0 - cos_theta * cos_theta);
         const cannot_refract = refraction_ratio * sin_theta > 1.0;
 
+        // Read "Reflections and Refractions in Ray Tracing" about TIR etc.
         var out_dir: Vec3 = undefined;
-        if (cannot_refract) {
+        if (cannot_refract or reflectanceSchlickApprox(cos_theta, self.refraction_index) > randFloat()) {
             out_dir = reflect(unit_dir, hit.normal);
         } else {
             out_dir = refract(unit_dir, hit.normal, refraction_ratio);
@@ -309,6 +310,16 @@ const Dielectric = struct {
             .is_scattered = true,
             .attenuation = white,
         };
+    }
+
+    // NOTE: This is sneaky. There is no comparison between eta_1 and eta_2.
+    // This will only work if the normal always points toward the side where the refraction index is smaller.
+    // Luckily this also ok for spheres with a negative radius (but only because of the way
+    // the sphere <-> ray intersection routine computes the normal).
+    fn reflectanceSchlickApprox(cosine: f32, ref_idx: f32) f32 {
+        var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+        r0 = r0 * r0;
+        return r0 + (1.0 - r0) * std.math.pow(f32, 1.0 - cosine, 5.0);
     }
 };
 const Material = union(enum) {
@@ -386,6 +397,11 @@ pub fn main() !void {
     try world.spheres.append(.{
         .center = .{ -1.0, 0.0, -1.0 },
         .radius = 0.5,
+        .material = &mat_left,
+    });
+    try world.spheres.append(.{
+        .center = .{ -1.0, 0.0, -1.0 },
+        .radius = -0.4,
         .material = &mat_left,
     });
     try world.spheres.append(.{
