@@ -33,22 +33,19 @@ fn clamp(x: f32, min: f32, max: f32) f32 {
 
 // Abuse __m128 as 3D vector, allows using the usual math operators (mostly).
 const Vec3 = @Vector(3, f32);
-fn vec(x: f32, y: f32, z: f32) Vec3 {
-    return Vec3{ x, y, z };
-}
 fn scalar(s: f32) Vec3 {
-    return vec(s, s, s);
+    return .{ s, s, s };
 }
 fn dot(lhs: Vec3, rhs: Vec3) f32 {
     // Note that this wouldn't work if we used @Vector(4, ...) because the 4th lane can contain garbage.
     return @reduce(.Add, lhs * rhs);
 }
 fn cross(lhs: Vec3, rhs: Vec3) Vec3 {
-    return vec(
+    return .{
         lhs.y * rhs.z - rhs.y * lhs.z,
         lhs.z * rhs.x - rhs.z * lhs.x,
         lhs.x * rhs.y - rhs.x * lhs.y,
-    );
+    };
 }
 fn lengthSquared(v: Vec3) f32 {
     return dot(v, v);
@@ -59,16 +56,19 @@ fn length(v: Vec3) f32 {
 fn normalize(v: Vec3) Vec3 {
     return v / scalar(length(v));
 }
+fn nearZero(v: Vec3) bool {
+    const threshold = 1e-8;
+    return @reduce(.And, @fabs(v) < scalar(threshold));
+}
 const zero = scalar(0.0);
 const one = scalar(1.0);
 
 const Color = Vec3;
-const color = vec;
 const black = scalar(0.0);
 const white = scalar(1.0);
-const red = color(1.0, 0.0, 0.0);
-const green = color(0.0, 1.0, 0.0);
-const blue = color(0.0, 0.0, 1.0);
+const red = Color{ 1.0, 0.0, 0.0 };
+const green = Color{ 0.0, 1.0, 0.0 };
+const blue = Color{ 0.0, 0.0, 1.0 };
 
 const RGB8 = struct {
     r: u8,
@@ -77,7 +77,7 @@ const RGB8 = struct {
 
     pub fn init(col: Color, samples_per_pixel: usize) RGB8 {
         var c = col / scalar(@intToFloat(f32, samples_per_pixel));
-        c = @sqrt(c);
+        c = @sqrt(c); // poor man's gamma encoding
         return .{
             .r = @floatToInt(u8, 256.0 * clamp(c[0], 0.0, 0.999)),
             .g = @floatToInt(u8, 256.0 * clamp(c[1], 0.0, 0.999)),
@@ -98,7 +98,7 @@ const Ray = struct {
 const HitRecord = struct {
     pos: Vec3,
     normal: Vec3,
-    material: *Material,
+    material: *const Material,
     t: f32,
     is_front_face: bool,
 
@@ -111,7 +111,7 @@ const HitRecord = struct {
 const Sphere = struct {
     center: Vec3,
     radius: f32,
-    material: *Material,
+    material: *const Material,
 
     pub fn hit(self: Sphere, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
         const oc = r.origin - self.center;
@@ -180,9 +180,9 @@ const Camera = struct {
 
         var res: Camera = undefined;
         res.origin = zero;
-        res.horizontal = vec(viewport_width, 0.0, 0.0);
-        res.vertical = vec(0.0, viewport_height, 0.0);
-        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - vec(0.0, 0.0, focal_length);
+        res.horizontal = .{ viewport_width, 0.0, 0.0 };
+        res.vertical = .{ 0.0, viewport_height, 0.0 };
+        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - Vec3{ 0.0, 0.0, focal_length };
         return res;
     }
 
@@ -202,20 +202,36 @@ fn randomUnitVector() Vec3 {
     const theta = 2.0 * pi * randFloat();
     const w_x = r * @cos(theta);
     const w_y = r * @sin(theta);
-    return vec(w_x, w_y, w_z);
+    return .{ w_x, w_y, w_z };
 }
-
-fn randomInUnitSphere() Vec3 {
+fn randomInUnitSphereRejectionSampling() Vec3 {
     while (true) {
-        const p = vec(
+        const p = Vec3{
             randFloatRange(-1.0, 1.0),
             randFloatRange(-1.0, 1.0),
             randFloatRange(-1.0, 1.0),
-        );
+        };
         if (lengthSquared(p) < 1.0) {
             return p;
         }
     }
+}
+// Is it correct to use the cubic root of a uniform random number as radius?
+// Probably: https://stackoverflow.com/a/5408843
+fn randomInUnitSphere() Vec3 {
+    const rand_unit = randomUnitVector();
+    const radius = std.math.pow(f32, randFloat(), 1.0 / 3.0);
+    return scalar(radius) * rand_unit;
+}
+
+fn reflect(v: Vec3, n: Vec3) Vec3 {
+    return v - scalar(2.0 * dot(v, n)) * n;
+}
+fn refract(uv: Vec3, n: Vec3, etai_over_etat: f32) Vec3 {
+    const cos_theta = std.math.min(dot(-uv, n), 1.0);
+    const r_out_perp = scalar(etai_over_etat) * (uv + scalar(cos_theta) * n);
+    const r_out_parallel = scalar(-@sqrt(@fabs(1.0 - lengthSquared(r_out_perp)))) * n;
+    return r_out_perp + r_out_parallel;
 }
 
 const Scatter = struct {
@@ -227,8 +243,18 @@ const Scatter = struct {
 const Lambertian = struct {
     albedo: Vec3,
 
-    pub fn scatter(self: Lambertian, hit: HitRecord) Scatter {
-        const scatter_dir = hit.normal + randomUnitVector();
+    pub fn scatter(self: Lambertian, r_in: Ray, hit: HitRecord) Scatter {
+        _ = r_in;
+        // This is cosine weighted importance sampling of the direction.
+        // (See: https://twitter.com/mmalex/status/1550765798263758848)
+        // The pdf is cos(theta) / pi
+        // cos cancels the cos in the lighting equation
+        // A proper Lambertian BRDF is albeda / pi
+        // The pis in the pdf and the BRDF cancel each other.
+        var scatter_dir = hit.normal + randomUnitVector();
+        if (nearZero(scatter_dir)) {
+            scatter_dir = hit.normal;
+        }
         return .{
             .ray_out = Ray{
                 .origin = hit.pos,
@@ -242,9 +268,38 @@ const Lambertian = struct {
 const Metal = struct {
     albedo: Vec3,
     fuzz: f32,
+
+    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) Scatter {
+        // NOTE: In the book, r_in.dir is normalized. I don't think that is necessary.
+        const reflected = reflect(r_in.dir, hit.normal);
+        const dir_out = reflected + scalar(self.fuzz) * randomInUnitSphere();
+        return .{
+            .ray_out = Ray{
+                .origin = hit.pos,
+                .dir = dir_out,
+            },
+            .is_scattered = dot(dir_out, hit.normal) > 0.0, // This will absorb the ray if the fuzziness reflects below the surface
+            .attenuation = self.albedo, // Does this BRDF integrate to 1 over the hemisphere?
+        };
+    }
 };
 const Dielectric = struct {
     refraction_index: f32,
+
+    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) Scatter {
+        const refraction_ratio = if (hit.front_face) (1.0 / self.refraction_index) else self.refraction_index;
+
+        const unit_dir = normalize(r_in.dir);
+        const refracted = refract(unit_dir, hit.normal, refraction_ratio);
+        return .{
+            .ray_out = Ray{
+                .origin = hit.pos,
+                .dir = refracted,
+            },
+            .is_scattered = true,
+            .attenuation = white,
+        };
+    }
 };
 const Material = union(enum) {
     lambertian: Lambertian,
@@ -254,7 +309,8 @@ const Material = union(enum) {
     pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) Scatter {
         _ = r_in;
         return switch (self) {
-            .lambertian => |l| l.scatter(hit),
+            .lambertian => |l| l.scatter(r_in, hit),
+            .metal => |m| m.scatter(r_in, hit),
             //.lambertian => |l| {
             //    const scatter_dir = hit.normal + randomUnitVector();
             //    return .{
@@ -266,7 +322,7 @@ const Material = union(enum) {
             //        .attenuation = l.albedo, // missing 1 / pi
             //    };
             //},
-            _ => unreachable,
+            else => unreachable,
         };
     }
 };
@@ -278,21 +334,15 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
 
     const intersection = world.hit(r, 0.001, infinity);
     if (intersection) |hit| {
-        // This is cosine weighted importance sampling of the direction.
-        // (See: https://twitter.com/mmalex/status/1550765798263758848)
-        // The pdf is cos(theta) / pi
-        // cos cancels the cos in the lighting equation
-        // A proper Lambertian BRDF is albeda / pi
-        // The pis in the pdf and the BRDF cancel each other.
-        const target_dir = hit.normal + randomUnitVector();
-        const lambertian_brdf = scalar(0.5);
-        return lambertian_brdf * rayColor(world, Ray{
-            .origin = hit.pos,
-            .dir = target_dir,
-        }, depth - 1);
+        const scatter = hit.material.scatter(r, hit);
+        if (scatter.is_scattered) {
+            return scatter.attenuation * rayColor(world, scatter.ray_out, depth - 1);
+        } else {
+            return black;
+        }
     } else {
         const t = scalar(0.5 * (normalize(r.dir)[1] + 1.0));
-        return (one - t) * white + t * color(0.5, 0.7, 1.0);
+        return (one - t) * white + t * Color{ 0.5, 0.7, 1.0 };
     }
 }
 
@@ -306,26 +356,42 @@ pub fn main() !void {
     const samples_per_pixel = 100;
     const max_depth = 50;
 
+    const mat_ground = Material{
+        .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
+    };
+    const mat_center = Material{
+        .lambertian = .{ .albedo = .{ 0.7, 0.3, 0.3 } },
+    };
+    const mat_left = Material{
+        .metal = .{ .albedo = .{ 0.8, 0.8, 0.8 }, .fuzz = 0.3 },
+    };
+    const mat_right = Material{
+        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 1.0 },
+    };
+
     var world = World.init();
     defer world.deinit();
+
     try world.spheres.append(.{
-        .center = vec(0.0, -100.5, -1.0),
+        .center = .{ 0.0, -100.5, -1.0 },
         .radius = 100.0,
-        .material = undefined,
+        .material = &mat_ground,
     });
     try world.spheres.append(.{
-        .center = vec(0.0, 0.0, -1.0),
+        .center = .{ 0.0, 0.0, -1.0 },
         .radius = 0.5,
-        .material = undefined,
+        .material = &mat_center,
     });
-    //try world.spheres.append(.{
-    //    .center = vec(0.5, 0.0, -1.5),
-    //    .radius = 0.5,
-    //});
-    //try world.spheres.append(.{
-    //    .center = vec(-0.5, 0.0, -0.5),
-    //    .radius = 0.5,
-    //});
+    try world.spheres.append(.{
+        .center = .{ -1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = &mat_left,
+    });
+    try world.spheres.append(.{
+        .center = .{ 1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = &mat_right,
+    });
 
     var y: usize = 0;
     while (y < image_height) : (y += 1) {
