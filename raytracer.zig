@@ -205,16 +205,16 @@ fn randomUnitVector() Vec3 {
     return .{ w_x, w_y, w_z };
 }
 fn randomInUnitSphereRejectionSampling() Vec3 {
-    while (true) {
+    return while (true) {
         const p = Vec3{
             randFloatRange(-1.0, 1.0),
             randFloatRange(-1.0, 1.0),
             randFloatRange(-1.0, 1.0),
         };
         if (lengthSquared(p) < 1.0) {
-            return p;
+            break p;
         }
-    }
+    } else unreachable;
 }
 // Is it correct to use the cubic root of a uniform random number as radius?
 // Probably: https://stackoverflow.com/a/5408843
@@ -236,15 +236,13 @@ fn refract(uv: Vec3, n: Vec3, etai_over_etat: f32) Vec3 {
 
 const Scatter = struct {
     ray_out: Ray,
-    is_scattered: bool,
     attenuation: Color,
 };
 
 const Lambertian = struct {
     albedo: Vec3,
 
-    pub fn scatter(self: Lambertian, r_in: Ray, hit: HitRecord) Scatter {
-        _ = r_in;
+    pub fn scatter(self: Lambertian, hit: HitRecord) Scatter {
         // This is cosine weighted importance sampling of the direction.
         // (See: https://twitter.com/mmalex/status/1550765798263758848)
         // The pdf is cos(theta) / pi
@@ -260,7 +258,6 @@ const Lambertian = struct {
                 .origin = hit.pos,
                 .dir = scatter_dir,
             },
-            .is_scattered = true,
             .attenuation = self.albedo, // missing 1 / pi
         };
     }
@@ -269,18 +266,23 @@ const Metal = struct {
     albedo: Vec3,
     fuzz: f32,
 
-    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) Scatter {
+    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) ?Scatter {
         // NOTE: In the book, r_in.dir is normalized. I don't think that is necessary.
         const reflected = reflect(r_in.dir, hit.normal);
         const dir_out = reflected + scalar(self.fuzz) * randomInUnitSphere();
-        return .{
-            .ray_out = Ray{
-                .origin = hit.pos,
-                .dir = dir_out,
-            },
-            .is_scattered = dot(dir_out, hit.normal) > 0.0, // This will absorb the ray if the fuzziness reflects below the surface
-            .attenuation = self.albedo, // Does this BRDF integrate to 1 over the hemisphere?
-        };
+
+        // This will absorb the ray if the fuzziness reflects below the surface
+        if (dot(dir_out, hit.normal) > 0.0) {
+            return Scatter{
+                .ray_out = Ray{
+                    .origin = hit.pos,
+                    .dir = dir_out,
+                },
+                .attenuation = self.albedo, // Does this BRDF integrate to 1 over the hemisphere?
+            };
+        } else {
+            return null;
+        }
     }
 };
 const Dielectric = struct {
@@ -307,7 +309,6 @@ const Dielectric = struct {
                 .origin = hit.pos,
                 .dir = out_dir,
             },
-            .is_scattered = true,
             .attenuation = white,
         };
     }
@@ -327,9 +328,9 @@ const Material = union(enum) {
     metal: Metal,
     dielectric: Dielectric,
 
-    pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) Scatter {
+    pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) ?Scatter {
         return switch (self) {
-            .lambertian => |l| l.scatter(r_in, hit),
+            .lambertian => |l| l.scatter(hit),
             .metal => |m| m.scatter(r_in, hit),
             .dielectric => |d| d.scatter(r_in, hit),
         };
@@ -343,8 +344,7 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
 
     const intersection = world.hit(r, 0.001, infinity);
     if (intersection) |hit| {
-        const scatter = hit.material.scatter(r, hit);
-        if (scatter.is_scattered) {
+        if (hit.material.scatter(r, hit)) |scatter| {
             return scatter.attenuation * rayColor(world, scatter.ray_out, depth - 1);
         } else {
             return black;
