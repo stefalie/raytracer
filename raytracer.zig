@@ -23,15 +23,6 @@ fn randFloat() f32 {
 fn randFloatRange(min: f32, max: f32) f32 {
     return min + (max - min) * randFloat();
 }
-//fn clamp(x: f32, min: f32, max: f32) f32 {
-//    if (x < min) {
-//        return min;
-//    }
-//    if (x > max) {
-//        return max;
-//    }
-//    return x;
-//}
 
 // Abuse __m128 as 3D vector, allows using the usual math operators (mostly).
 const Vec3 = @Vector(3, f32);
@@ -59,7 +50,7 @@ fn normalize(v: Vec3) Vec3 {
     return v / scalar(length(v));
 }
 fn nearZero(v: Vec3) bool {
-    const threshold = 1e-8;
+    const threshold = 1.0e-8;
     return @reduce(.And, @fabs(v) < scalar(threshold));
 }
 const zero = scalar(0.0);
@@ -100,8 +91,8 @@ const Ray = struct {
 const HitRecord = struct {
     pos: Vec3,
     normal: Vec3,
-    material: *const Material,
     t: f32,
+    material: MaterialHandle,
     is_front_face: bool,
 
     pub fn setFaceNormal(self: *HitRecord, r: Ray, outward_normal: Vec3) void {
@@ -113,7 +104,7 @@ const HitRecord = struct {
 const Sphere = struct {
     center: Vec3,
     radius: f32,
-    material: *const Material,
+    material: MaterialHandle,
 
     pub fn hit(self: Sphere, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
         const oc = r.origin - self.center;
@@ -147,12 +138,25 @@ const Sphere = struct {
 
 const World = struct {
     spheres: std.ArrayList(Sphere),
+    materials: std.ArrayList(Material),
 
     pub fn init() World {
-        return .{ .spheres = std.ArrayList(Sphere).init(gpa) };
+        return .{
+            .spheres = std.ArrayList(Sphere).init(gpa),
+            .materials = std.ArrayList(Material).init(gpa),
+        };
     }
     pub fn deinit(self: World) void {
         self.spheres.deinit();
+        self.materials.deinit();
+    }
+
+    pub fn addSphere(self: *World, sphere: Sphere) void {
+        self.spheres.append(sphere) catch unreachable;
+    }
+    pub fn addMaterial(self: *World, mat: Material) MaterialHandle {
+        self.materials.append(mat) catch unreachable;
+        return @intCast(MaterialHandle, self.materials.items.len - 1);
     }
 
     pub fn hit(self: World, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
@@ -340,6 +344,7 @@ const Material = union(enum) {
         };
     }
 };
+const MaterialHandle = u16;
 
 fn rayColor(world: *World, r: Ray, depth: isize) Color {
     if (depth <= 0) {
@@ -348,7 +353,8 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
 
     const intersection = world.hit(r, 0.001, infinity);
     if (intersection) |hit| {
-        if (hit.material.scatter(r, hit)) |scatter| {
+        const mat = world.materials.items[hit.material];
+        if (mat.scatter(r, hit)) |scatter| {
             return scatter.attenuation * rayColor(world, scatter.ray_out, depth - 1);
         } else {
             return black;
@@ -366,53 +372,14 @@ pub fn main() !void {
     const image_width = 400;
     const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
     var image: [image_height][image_width]RGB8 = undefined;
-    const samples_per_pixel = 10;
+    const samples_per_pixel = 100;
     const max_depth = 50;
 
-    const mat_ground = Material{
-        .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
-    };
-    const mat_center = Material{
-        //.lambertian = .{ .albedo = .{ 0.7, 0.3, 0.3 } },
-        //.dielectric = .{ .refraction_index = 1.5 },
-        .lambertian = .{ .albedo = .{ 0.1, 0.2, 0.5 } },
-    };
-    const mat_left = Material{
-        //.metal = .{ .albedo = .{ 0.8, 0.8, 0.8 }, .fuzz = 0.3 },
-        .dielectric = .{ .refraction_index = 1.5 },
-    };
-    const mat_right = Material{
-        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 0.0 },
-    };
-
-    var world = World.init();
+    var world: World = undefined;
+    //world = sceneInitialGrey();
+    //world = sceneFuzzedMetal();
+    world = sceneDieletricHollow();
     defer world.deinit();
-
-    try world.spheres.append(.{
-        .center = .{ 0.0, -100.5, -1.0 },
-        .radius = 100.0,
-        .material = &mat_ground,
-    });
-    try world.spheres.append(.{
-        .center = .{ 0.0, 0.0, -1.0 },
-        .radius = 0.5,
-        .material = &mat_center,
-    });
-    try world.spheres.append(.{
-        .center = .{ -1.0, 0.0, -1.0 },
-        .radius = 0.5,
-        .material = &mat_left,
-    });
-    try world.spheres.append(.{
-        .center = .{ -1.0, 0.0, -1.0 },
-        .radius = -0.4,
-        .material = &mat_left,
-    });
-    try world.spheres.append(.{
-        .center = .{ 1.0, 0.0, -1.0 },
-        .radius = 0.5,
-        .material = &mat_right,
-    });
 
     var y: usize = 0;
     while (y < image_height) : (y += 1) {
@@ -446,4 +413,110 @@ pub fn main() !void {
         @ptrCast(*const anyopaque, &image),
         image_width * 3,
     );
+}
+
+fn sceneInitialGrey() World {
+    var world = World.init();
+
+    const mat_gray = world.addMaterial(.{
+        .lambertian = .{ .albedo = scalar(0.5) },
+    });
+
+    world.addSphere(.{
+        .center = .{ 0.0, -100.5, -1.0 },
+        .radius = 100.0,
+        .material = mat_gray,
+    });
+    world.addSphere(.{
+        .center = .{ 0.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_gray,
+    });
+
+    return world;
+}
+
+fn sceneFuzzedMetal() World {
+    var world = World.init();
+
+    const mat_ground = world.addMaterial(.{
+        .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
+    });
+    const mat_center = world.addMaterial(.{
+        .lambertian = .{ .albedo = .{ 0.7, 0.3, 0.3 } },
+    });
+    const mat_left = world.addMaterial(.{
+        .metal = .{ .albedo = .{ 0.8, 0.8, 0.8 }, .fuzz = 0.3 },
+    });
+    const mat_right = world.addMaterial(.{
+        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 1.0 },
+    });
+
+    world.addSphere(.{
+        .center = .{ 0.0, -100.5, -1.0 },
+        .radius = 100.0,
+        .material = mat_ground,
+    });
+    world.addSphere(.{
+        .center = .{ 0.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_center,
+    });
+    world.addSphere(.{
+        .center = .{ -1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_left,
+    });
+    world.addSphere(.{
+        .center = .{ 1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_right,
+    });
+
+    return world;
+}
+
+fn sceneDieletricHollow() World {
+    var world = World.init();
+
+    const mat_ground = world.addMaterial(.{
+        .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
+    });
+    const mat_center = world.addMaterial(.{
+        .lambertian = .{ .albedo = .{ 0.1, 0.2, 0.5 } },
+    });
+    const mat_left = world.addMaterial(.{
+        .dielectric = .{ .refraction_index = 1.5 },
+    });
+    const mat_right = world.addMaterial(.{
+        .metal = .{ .albedo = .{ 0.8, 0.6, 0.2 }, .fuzz = 0.0 },
+    });
+
+    world.addSphere(.{
+        .center = .{ 0.0, -100.5, -1.0 },
+        .radius = 100.0,
+        .material = mat_ground,
+    });
+    world.addSphere(.{
+        .center = .{ 0.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_center,
+    });
+    world.addSphere(.{
+        .center = .{ -1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_left,
+    });
+    world.addSphere(.{
+        .center = .{ -1.0, 0.0, -1.0 },
+        .radius = -0.4,
+        .material = mat_left,
+    });
+    world.addSphere(.{
+        .center = .{ 1.0, 0.0, -1.0 },
+        .radius = 0.5,
+        .material = mat_right,
+    });
+
+    return world;
 }
