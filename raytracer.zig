@@ -10,10 +10,12 @@ const gpa = general_purpose_allocator.allocator();
 
 var pcg = std.rand.Pcg.init(0x853c49e6748fea9b);
 
-fn deg2Rad(deg: f32) f32 {
-    return std.math.degreesToRadians(f32, deg);
-}
 const pi = std.math.pi;
+fn deg2Rad(deg: f32) f32 {
+    return deg / 180.0 * pi;
+    // In Zig 10.0
+    // return std.math.degreesToRadians(f32, deg);
+}
 const infinity = std.math.inf(f32);
 fn randFloat() f32 {
     return pcg.random().float(f32);
@@ -21,15 +23,15 @@ fn randFloat() f32 {
 fn randFloatRange(min: f32, max: f32) f32 {
     return min + (max - min) * randFloat();
 }
-fn clamp(x: f32, min: f32, max: f32) f32 {
-    if (x < min) {
-        return min;
-    }
-    if (x > max) {
-        return max;
-    }
-    return x;
-}
+//fn clamp(x: f32, min: f32, max: f32) f32 {
+//    if (x < min) {
+//        return min;
+//    }
+//    if (x > max) {
+//        return max;
+//    }
+//    return x;
+//}
 
 // Abuse __m128 as 3D vector, allows using the usual math operators (mostly).
 const Vec3 = @Vector(3, f32);
@@ -75,13 +77,13 @@ const RGB8 = struct {
     g: u8,
     b: u8,
 
-    pub fn init(col: Color, samples_per_pixel: usize) RGB8 {
-        var c = col / scalar(@intToFloat(f32, samples_per_pixel));
-        c = @sqrt(c); // poor man's gamma encoding
+    pub fn init(color_acc: Color, samples_per_pixel: usize) RGB8 {
+        const color_avg = color_acc / scalar(@intToFloat(f32, samples_per_pixel));
+        const color_gamma_encdoed = @sqrt(color_avg); // poor man's gamma encoding
         return .{
-            .r = @floatToInt(u8, 256.0 * clamp(c[0], 0.0, 0.999)),
-            .g = @floatToInt(u8, 256.0 * clamp(c[1], 0.0, 0.999)),
-            .b = @floatToInt(u8, 256.0 * clamp(c[2], 0.0, 0.999)),
+            .r = @floatToInt(u8, 256.0 * std.math.clamp(color_gamma_encdoed[0], 0.0, 0.999)),
+            .g = @floatToInt(u8, 256.0 * std.math.clamp(color_gamma_encdoed[1], 0.0, 0.999)),
+            .b = @floatToInt(u8, 256.0 * std.math.clamp(color_gamma_encdoed[2], 0.0, 0.999)),
         };
     }
 };
@@ -173,8 +175,10 @@ const Camera = struct {
     horizontal: Vec3,
     vertical: Vec3,
 
-    pub fn init(aspect_ratio: f32) Camera {
-        const viewport_height = 2.0;
+    pub fn init(fovy: f32, aspect_ratio: f32) Camera {
+        const theta = deg2Rad(fovy);
+        const h = std.math.tan(theta * 0.5);
+        const viewport_height = 2.0 * h;
         const viewport_width = aspect_ratio * viewport_height;
         const focal_length = 1.0;
 
@@ -357,12 +361,12 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
 
 pub fn main() !void {
     const aspect_ratio = 16.0 / 9.0;
-    const cam = Camera.init(aspect_ratio);
+    const cam = Camera.init(90.0, 16.0 / 9.0);
 
     const image_width = 400;
     const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
     var image: [image_height][image_width]RGB8 = undefined;
-    const samples_per_pixel = 100;
+    const samples_per_pixel = 10;
     const max_depth = 50;
 
     const mat_ground = Material{
