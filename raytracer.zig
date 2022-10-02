@@ -140,11 +140,13 @@ const Sphere = struct {
 };
 
 const World = struct {
+    camera: Camera,
     spheres: std.ArrayList(Sphere),
     materials: std.ArrayList(Material),
 
-    pub fn init() World {
+    pub fn init(cam: Camera) World {
         return .{
+            .camera = cam,
             .spheres = std.ArrayList(Sphere).init(gpa),
             .materials = std.ArrayList(Material).init(gpa),
         };
@@ -181,8 +183,19 @@ const Camera = struct {
     lower_left_corner: Vec3,
     horizontal: Vec3,
     vertical: Vec3,
+    u: Vec3,
+    v: Vec3,
+    lens_radius: f32,
 
-    pub fn init(look_from: Vec3, look_at: Vec3, up: Vec3, fovy: f32, aspect_ratio: f32) Camera {
+    pub fn init(
+        look_from: Vec3,
+        look_at: Vec3,
+        up: Vec3,
+        fovy: f32,
+        aspect_ratio: f32,
+        aperture: f32,
+        focus_dist: f32,
+    ) Camera {
         const theta = deg2Rad(fovy);
         const h = std.math.tan(theta * 0.5);
         const viewport_height = 2.0 * h;
@@ -192,19 +205,28 @@ const Camera = struct {
         const u = normalize(cross(up, w));
         const v = cross(w, u);
 
-        var res: Camera = undefined;
-        res.origin = look_from;
-        res.horizontal = u * scalar(viewport_width);
-        res.vertical = v * scalar(viewport_height);
-        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - w;
-        return res;
+        const horizontal = u * scalar(focus_dist * viewport_width);
+        const vertical = v * scalar(focus_dist * viewport_height);
+        const lower_left_corner = look_from - scalar(0.5) * horizontal - scalar(0.5) * vertical - scalar(focus_dist) * w;
+
+        return .{
+            .origin = look_from,
+            .horizontal = horizontal,
+            .vertical = vertical,
+            .lower_left_corner = lower_left_corner,
+            .u = u,
+            .v = v,
+            .lens_radius = aperture * 0.5,
+        };
     }
 
     pub fn getRay(self: Camera, s: f32, t: f32) Ray {
+        const rd = scalar(self.lens_radius) * randomInUnitDisk();
+        const offset = self.u * scalar(rd[0]) + self.v * scalar(rd[1]);
         const pixel_pos = self.lower_left_corner + scalar(s) * self.horizontal + scalar(t) * self.vertical;
         return Ray{
-            .origin = self.origin,
-            .dir = pixel_pos - self.origin,
+            .origin = self.origin + offset,
+            .dir = pixel_pos - self.origin - offset,
         };
     }
 };
@@ -236,6 +258,11 @@ fn randomInUnitSphere() Vec3 {
     const rand_unit = randomUnitVector();
     const radius = std.math.pow(f32, randFloat(), 1.0 / 3.0);
     return scalar(radius) * rand_unit;
+}
+fn randomInUnitDisk() Vec3 {
+    const theta = 2.0 * pi * randFloat();
+    const r = @sqrt(randFloat());
+    return .{ r * @cos(theta), r * @sin(theta), 0.0 };
 }
 
 fn reflect(v: Vec3, n: Vec3) Vec3 {
@@ -371,21 +398,21 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
     }
 }
 
-pub fn main() !void {
-    const aspect_ratio = 16.0 / 9.0;
+const global_aspect_ratio = 16.0 / 9.0;
 
+pub fn main() !void {
     const image_width = 400;
-    const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
+    const image_height = @floatToInt(usize, @as(f32, image_width) / global_aspect_ratio);
     var image: [image_height][image_width]RGB8 = undefined;
     const samples_per_pixel = 100;
     const max_depth = 50;
 
-    const cam = Camera.init(zero, -unit_z, unit_y, 90.0, aspect_ratio);
-    //const cam = Camera.init(.{ -2.0, 2.0, 1.0 }, -unit_z, unit_y, 20.0, aspect_ratio);
-
-    //var world = sceneInitialGrey();
-    //var world = sceneFuzzedMetal();
-    var world = sceneDieletricHollow();
+    var world: World = undefined;
+    //world = sceneInitialGrey();
+    //world = sceneFuzzedMetal();
+    //world = sceneDieletricHollow();
+    //world = sceneDieletricHollowNewPerspective();
+    world = sceneDepthOfField();
     defer world.deinit();
 
     var y: usize = 0;
@@ -403,7 +430,7 @@ pub fn main() !void {
             while (i < samples_per_pixel) : (i += 1) {
                 const u = (@intToFloat(f32, x) + randFloat()) / @as(f32, image_width - 1);
                 const v = (@intToFloat(f32, y) + randFloat()) / @as(f32, image_height - 1);
-                const ray = cam.getRay(u, v);
+                const ray = world.camera.getRay(u, v);
                 pixel_color += rayColor(&world, ray, max_depth);
             }
 
@@ -423,7 +450,8 @@ pub fn main() !void {
 }
 
 fn sceneInitialGrey() World {
-    var world = World.init();
+    const cam = Camera.init(zero, -unit_z, unit_y, 90.0, global_aspect_ratio, 0.0, 1.0);
+    var world = World.init(cam);
 
     const mat_gray = world.addMaterial(.{
         .lambertian = .{ .albedo = scalar(0.5) },
@@ -444,7 +472,8 @@ fn sceneInitialGrey() World {
 }
 
 fn sceneFuzzedMetal() World {
-    var world = World.init();
+    const cam = Camera.init(zero, -unit_z, unit_y, 90.0, global_aspect_ratio, 0.0, 1.0);
+    var world = World.init(cam);
 
     const mat_ground = world.addMaterial(.{
         .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
@@ -484,7 +513,8 @@ fn sceneFuzzedMetal() World {
 }
 
 fn sceneDieletricHollow() World {
-    var world = World.init();
+    const cam = Camera.init(zero, -unit_z, unit_y, 90.0, global_aspect_ratio, 0.0, 1.0);
+    var world = World.init(cam);
 
     const mat_ground = world.addMaterial(.{
         .lambertian = .{ .albedo = .{ 0.8, 0.8, 0.0 } },
@@ -526,4 +556,20 @@ fn sceneDieletricHollow() World {
     });
 
     return world;
+}
+
+fn sceneDieletricHollowNewPerspective() World {
+    var v = sceneDieletricHollow();
+    v.camera = Camera.init(.{ -2.0, 2.0, 1.0 }, -unit_z, unit_y, 20.0, global_aspect_ratio, 0.0, 1.0);
+    return v;
+}
+
+fn sceneDepthOfField() World {
+    var v = sceneDieletricHollow();
+    const from = Vec3{ 3.0, 3.0, 2.0 };
+    const to = -unit_z;
+    const dist_to_focus = length(to - from);
+    const aperture = 2.0;
+    v.camera = Camera.init(from, to, unit_y, 20.0, global_aspect_ratio, aperture, dist_to_focus);
+    return v;
 }
