@@ -35,9 +35,9 @@ fn dot(lhs: Vec3, rhs: Vec3) f32 {
 }
 fn cross(lhs: Vec3, rhs: Vec3) Vec3 {
     return .{
-        lhs.y * rhs.z - rhs.y * lhs.z,
-        lhs.z * rhs.x - rhs.z * lhs.x,
-        lhs.x * rhs.y - rhs.x * lhs.y,
+        lhs[1] * rhs[2] - rhs[1] * lhs[2],
+        lhs[2] * rhs[0] - rhs[2] * lhs[0],
+        lhs[0] * rhs[1] - rhs[0] * lhs[1],
     };
 }
 fn lengthSquared(v: Vec3) f32 {
@@ -55,13 +55,16 @@ fn nearZero(v: Vec3) bool {
 }
 const zero = scalar(0.0);
 const one = scalar(1.0);
+const unit_x = Vec3{ 1.0, 0.0, 0.0 };
+const unit_y = Vec3{ 0.0, 1.0, 0.0 };
+const unit_z = Vec3{ 0.0, 0.0, 1.0 };
 
 const Color = Vec3;
 const black = scalar(0.0);
 const white = scalar(1.0);
-const red = Color{ 1.0, 0.0, 0.0 };
-const green = Color{ 0.0, 1.0, 0.0 };
-const blue = Color{ 0.0, 0.0, 1.0 };
+const red = unit_x;
+const green = unit_y;
+const blue = unit_z;
 
 const RGB8 = struct {
     r: u8,
@@ -179,23 +182,26 @@ const Camera = struct {
     horizontal: Vec3,
     vertical: Vec3,
 
-    pub fn init(fovy: f32, aspect_ratio: f32) Camera {
+    pub fn init(look_from: Vec3, look_at: Vec3, up: Vec3, fovy: f32, aspect_ratio: f32) Camera {
         const theta = deg2Rad(fovy);
         const h = std.math.tan(theta * 0.5);
         const viewport_height = 2.0 * h;
         const viewport_width = aspect_ratio * viewport_height;
-        const focal_length = 1.0;
+
+        const w = normalize(look_from - look_at);
+        const u = normalize(cross(up, w));
+        const v = cross(w, u);
 
         var res: Camera = undefined;
-        res.origin = zero;
-        res.horizontal = .{ viewport_width, 0.0, 0.0 };
-        res.vertical = .{ 0.0, viewport_height, 0.0 };
-        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - Vec3{ 0.0, 0.0, focal_length };
+        res.origin = look_from;
+        res.horizontal = u * scalar(viewport_width);
+        res.vertical = v * scalar(viewport_height);
+        res.lower_left_corner = res.origin - scalar(0.5) * res.horizontal - scalar(0.5) * res.vertical - w;
         return res;
     }
 
-    pub fn getRay(self: Camera, u: f32, v: f32) Ray {
-        const pixel_pos = self.lower_left_corner + scalar(u) * self.horizontal + scalar(v) * self.vertical;
+    pub fn getRay(self: Camera, s: f32, t: f32) Ray {
+        const pixel_pos = self.lower_left_corner + scalar(s) * self.horizontal + scalar(t) * self.vertical;
         return Ray{
             .origin = self.origin,
             .dir = pixel_pos - self.origin,
@@ -367,7 +373,6 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
 
 pub fn main() !void {
     const aspect_ratio = 16.0 / 9.0;
-    const cam = Camera.init(90.0, 16.0 / 9.0);
 
     const image_width = 400;
     const image_height = @floatToInt(usize, @as(f32, image_width) / aspect_ratio);
@@ -375,10 +380,12 @@ pub fn main() !void {
     const samples_per_pixel = 100;
     const max_depth = 50;
 
-    var world: World = undefined;
-    //world = sceneInitialGrey();
-    //world = sceneFuzzedMetal();
-    world = sceneDieletricHollow();
+    const cam = Camera.init(zero, -unit_z, unit_y, 90.0, aspect_ratio);
+    //const cam = Camera.init(.{ -2.0, 2.0, 1.0 }, -unit_z, unit_y, 20.0, aspect_ratio);
+
+    //var world = sceneInitialGrey();
+    //var world = sceneFuzzedMetal();
+    var world = sceneDieletricHollow();
     defer world.deinit();
 
     var y: usize = 0;
@@ -428,7 +435,7 @@ fn sceneInitialGrey() World {
         .material = mat_gray,
     });
     world.addSphere(.{
-        .center = .{ 0.0, 0.0, -1.0 },
+        .center = -unit_z,
         .radius = 0.5,
         .material = mat_gray,
     });
@@ -458,17 +465,17 @@ fn sceneFuzzedMetal() World {
         .material = mat_ground,
     });
     world.addSphere(.{
-        .center = .{ 0.0, 0.0, -1.0 },
+        .center = -unit_z,
         .radius = 0.5,
         .material = mat_center,
     });
     world.addSphere(.{
-        .center = .{ -1.0, 0.0, -1.0 },
+        .center = -unit_z - unit_x,
         .radius = 0.5,
         .material = mat_left,
     });
     world.addSphere(.{
-        .center = .{ 1.0, 0.0, -1.0 },
+        .center = -unit_z + unit_x,
         .radius = 0.5,
         .material = mat_right,
     });
@@ -498,22 +505,22 @@ fn sceneDieletricHollow() World {
         .material = mat_ground,
     });
     world.addSphere(.{
-        .center = .{ 0.0, 0.0, -1.0 },
+        .center = -unit_z,
         .radius = 0.5,
         .material = mat_center,
     });
     world.addSphere(.{
-        .center = .{ -1.0, 0.0, -1.0 },
+        .center = -unit_z - unit_x,
         .radius = 0.5,
         .material = mat_left,
     });
     world.addSphere(.{
-        .center = .{ -1.0, 0.0, -1.0 },
+        .center = -unit_z - unit_x,
         .radius = -0.4,
         .material = mat_left,
     });
     world.addSphere(.{
-        .center = .{ 1.0, 0.0, -1.0 },
+        .center = -unit_z + unit_x,
         .radius = 0.5,
         .material = mat_right,
     });
