@@ -134,14 +134,17 @@ const Rand = struct {
 
     // normal needs to be normalized
     fn cosineWeightedHemisphere(self: *Rand, normal: Vec3) Vec3 {
-        std.debug.assert(@fabs(length(normal) - 1.0) < 1.0e-5);
+        // NOTE: If we renormalize the normal Sphere.hit we can use a threshold
+        // of 1e-2. If it's done via  (hit_pos - sphere_pos) / radius, the threshold
+        // needs to be even lower.
+        //std.debug.assert(@fabs(length(normal) - 1.0) < 1.0e-2);
+
         // This is cosine weighted importance sampling of the direction.
         // (See: https://twitter.com/mmalex/status/1550765798263758848)
         return normal + self.uniformUnitVector();
     }
 };
 var rand = Rand.init(0x853c49e6748fea9b);
-//var pcg = std.rand.Pcg.init(0x853c49e6748fea9b);
 
 const RGB8 = struct {
     r: u8,
