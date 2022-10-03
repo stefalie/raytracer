@@ -75,6 +75,9 @@ const Rand = struct {
         return .{ .pcg = std.rand.Pcg.init(seed) };
     }
 
+    fn uniformInt(self: *Rand) u32 {
+        return self.pcg.random().int(u32);
+    }
     fn uniformFloat(self: *Rand) f32 {
         return self.pcg.random().float(f32);
     }
@@ -144,15 +147,15 @@ const Rand = struct {
         return normal + self.uniformUnitVector();
     }
 };
-var rand = Rand.init(0x853c49e6748fea9b);
+var global_rand = Rand.init(0x853c49e6748fea9b);
 
 const RGB8 = struct {
     r: u8,
     g: u8,
     b: u8,
 
-    pub fn init(color_acc: Color, samples_per_pixel: usize) RGB8 {
-        const color_avg = color_acc / scalar(@intToFloat(f32, samples_per_pixel));
+    pub fn init(color_acc: Color, num_samples: usize) RGB8 {
+        const color_avg = color_acc / scalar(@intToFloat(f32, num_samples));
         const color_gamma_encdoed = @sqrt(color_avg); // poor man's gamma encoding
         return .{
             .r = @floatToInt(u8, 256.0 * std.math.clamp(color_gamma_encdoed[0], 0.0, 0.999)),
@@ -215,9 +218,8 @@ const Sphere = struct {
         rec.material = self.material;
         // Normalizing by dividing by radius is less precise than re-normalizing.
         //const outward_normal = (rec.pos - self.center) / scalar(self.radius);
-        //std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-2);
         const outward_normal = normalize(rec.pos - self.center);
-        std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-5);
+        std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-2);
         rec.setFaceNormal(r, outward_normal);
         return rec;
     }
@@ -248,7 +250,7 @@ const World = struct {
         return @intCast(MaterialHandle, self.materials.items.len - 1);
     }
 
-    pub fn hit(self: World, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
+    pub fn hit(self: *const World, r: Ray, t_min: f32, t_max: f32) ?HitRecord {
         var result_rec: ?HitRecord = null;
 
         for (self.spheres.items) |s| {
@@ -259,6 +261,30 @@ const World = struct {
         }
 
         return result_rec;
+    }
+};
+
+const Framebuffer = struct {
+    width: usize,
+    height: usize,
+    image: std.ArrayList(RGB8),
+
+    pub fn init(width: usize, aspect_ratio: f32) Framebuffer {
+        const height = @floatToInt(usize, @intToFloat(f32, width) / aspect_ratio);
+        var img = std.ArrayList(RGB8).init(gpa);
+        img.resize(width * height) catch unreachable;
+        return .{
+            .width = width,
+            .height = height,
+            .image = img,
+        };
+    }
+    pub fn deinit(self: Framebuffer) void {
+        self.image.deinit();
+    }
+
+    pub fn setPixel(self: Framebuffer, x: usize, y: usize, value: RGB8) void {
+        self.image.items[y * self.width + x] = value;
     }
 };
 
@@ -306,7 +332,7 @@ const Camera = struct {
         };
     }
 
-    pub fn getRay(self: Camera, s: f32, t: f32) Ray {
+    pub fn getRay(self: Camera, s: f32, t: f32, rand: *Rand) Ray {
         const rd = scalar(self.lens_radius) * rand.uniformDisk();
         const offset = self.u * scalar(rd[0]) + self.v * scalar(rd[1]);
         const pixel_pos = self.lower_left_corner + scalar(s) * self.horizontal + scalar(t) * self.vertical;
@@ -325,7 +351,7 @@ const Scatter = struct {
 const Lambertian = struct {
     albedo: Vec3,
 
-    pub fn scatter(self: Lambertian, hit: HitRecord) Scatter {
+    pub fn scatter(self: Lambertian, hit: HitRecord, rand: *Rand) Scatter {
         // The pdf is cos(theta) / pi
         // cos cancels the cos in the lighting equation
         // A proper Lambertian BRDF is albeda / pi
@@ -347,7 +373,7 @@ const Metal = struct {
     albedo: Vec3,
     fuzz: f32,
 
-    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord) ?Scatter {
+    pub fn scatter(self: Metal, r_in: Ray, hit: HitRecord, rand: *Rand) ?Scatter {
         // NOTE: reflected needs to be normalized because 'fuzz' is assumed to be added to a unit vector.
         const reflected = reflect(normalize(r_in.dir), hit.normal);
         const dir_out = reflected + scalar(self.fuzz) * rand.uniformSphere();
@@ -369,7 +395,7 @@ const Metal = struct {
 const Dielectric = struct {
     refraction_index: f32,
 
-    pub fn scatter(self: Dielectric, r_in: Ray, hit: HitRecord) Scatter {
+    pub fn scatter(self: Dielectric, r_in: Ray, hit: HitRecord, rand: *Rand) Scatter {
         const refraction_ratio = if (hit.is_front_face) (1.0 / self.refraction_index) else self.refraction_index;
         const unit_dir = normalize(r_in.dir);
 
@@ -409,17 +435,17 @@ const Material = union(enum) {
     metal: Metal,
     dielectric: Dielectric,
 
-    pub fn scatter(self: Material, r_in: Ray, hit: HitRecord) ?Scatter {
+    pub fn scatter(self: Material, r_in: Ray, hit: HitRecord, rand: *Rand) ?Scatter {
         return switch (self) {
-            .lambertian => |l| l.scatter(hit),
-            .metal => |m| m.scatter(r_in, hit),
-            .dielectric => |d| d.scatter(r_in, hit),
+            .lambertian => |l| l.scatter(hit, rand),
+            .metal => |m| m.scatter(r_in, hit, rand),
+            .dielectric => |d| d.scatter(r_in, hit, rand),
         };
     }
 };
 const MaterialHandle = u16;
 
-fn rayColor(world: *World, r: Ray, depth: isize) Color {
+fn rayColor(world: *const World, r: Ray, depth: isize, rand: *Rand) Color {
     if (depth <= 0) {
         return black;
     }
@@ -427,8 +453,8 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
     const intersection = world.hit(r, 0.001, infinity);
     if (intersection) |hit| {
         const mat = world.materials.items[hit.material];
-        if (mat.scatter(r, hit)) |scatter| {
-            return scatter.attenuation * rayColor(world, scatter.ray_out, depth - 1);
+        if (mat.scatter(r, hit, rand)) |scatter| {
+            return scatter.attenuation * rayColor(world, scatter.ray_out, depth - 1, rand);
         } else {
             return black;
         }
@@ -436,6 +462,85 @@ fn rayColor(world: *World, r: Ray, depth: isize) Color {
         const t = scalar(0.5 * (normalize(r.dir)[1] + 1.0));
         return (one - t) * white + t * Color{ 0.5, 0.7, 1.0 };
     }
+}
+
+const RenderContext = struct {
+    framebuffer: Framebuffer,
+    world: *const World,
+    rand: Rand,
+
+    y_start: usize,
+    y_end: usize,
+    thread: std.Thread,
+};
+
+fn renderThread(ctx: *RenderContext) void {
+    const img_width = ctx.framebuffer.width;
+    const img_height = ctx.framebuffer.height;
+
+    var y: usize = ctx.y_start;
+    while (y < ctx.y_end) : (y += 1) {
+        const remaining_lines = ctx.y_end - y;
+        if (remaining_lines % 10 == 0) {
+            std.debug.print("Thread {}: Remaining scanlines: {}\n", .{ std.Thread.getCurrentId(), remaining_lines });
+        }
+
+        var x: usize = 0;
+        while (x < img_width) : (x += 1) {
+            var pixel_color = zero;
+
+            var i: usize = 0;
+            while (i < samples_per_pixel) : (i += 1) {
+                const u = (@intToFloat(f32, x) + ctx.rand.uniformFloat()) / @intToFloat(f32, img_width - 1);
+                const v = (@intToFloat(f32, y) + ctx.rand.uniformFloat()) / @intToFloat(f32, img_height - 1);
+                const ray = ctx.world.camera.getRay(u, v, &ctx.rand);
+                pixel_color += rayColor(ctx.world, ray, max_depth, &ctx.rand);
+            }
+
+            ctx.framebuffer.setPixel(x, y, RGB8.init(pixel_color, samples_per_pixel));
+        }
+    }
+
+    std.debug.print("Thread {}: Done\n", .{std.Thread.getCurrentId()});
+}
+
+const image_width: usize = 1680; // 1680; // 400
+const samples_per_pixel: usize = 500; // 500; // 10
+const max_depth: usize = 50;
+const num_threads = 16;
+
+fn renderSceneToPng(world: *const World, file_name: [:0]u8) !void {
+    var fb = Framebuffer.init(image_width, world.camera.aspect_ratio);
+    defer fb.deinit();
+
+    var threads: [num_threads]RenderContext = undefined;
+    const num_lines_per_thread = (fb.height + num_threads - 1) / num_threads;
+
+    var i: usize = 0;
+    while (i < num_threads) : (i += 1) {
+        threads[i] = RenderContext{
+            .framebuffer = fb,
+            .world = world,
+            .rand = Rand.init(global_rand.uniformInt()),
+            .y_start = i * num_lines_per_thread,
+            .y_end = std.math.min((i + 1) * num_lines_per_thread, fb.height),
+            .thread = try std.Thread.spawn(.{}, renderThread, .{&threads[i]}),
+        };
+    }
+
+    for (threads) |ctx| {
+        ctx.thread.join();
+    }
+
+    stb.stbi_flip_vertically_on_write(1);
+    _ = stb.stbi_write_png(
+        file_name,
+        @intCast(c_int, fb.width),
+        @intCast(c_int, fb.height),
+        3,
+        @ptrCast(*const anyopaque, fb.image.items),
+        @intCast(c_int, fb.width * 3),
+    );
 }
 
 pub fn main() !void {
@@ -453,51 +558,10 @@ pub fn main() !void {
         var world = scene_func();
         defer world.deinit();
 
-        const image_width: usize = 1680; // 400
-        const image_height = @floatToInt(usize, @as(f32, image_width) / world.camera.aspect_ratio);
-        const samples_per_pixel = 500; // 100
-        const max_depth = 50;
-
-        var image = std.ArrayList(RGB8).init(gpa);
-        defer image.deinit();
-        try image.resize(image_width * image_height);
-
-        var y: usize = 0;
-        while (y < image_height) : (y += 1) {
-            const remaining_lines = image_height - y;
-            if (remaining_lines % 10 == 0) {
-                std.debug.print("Scanlines remaining: {}\n", .{remaining_lines});
-            }
-
-            var x: usize = 0;
-            while (x < image_width) : (x += 1) {
-                var pixel_color = zero;
-
-                var i: usize = 0;
-                while (i < samples_per_pixel) : (i += 1) {
-                    const u = (@intToFloat(f32, x) + rand.uniformFloat()) / @intToFloat(f32, image_width - 1);
-                    const v = (@intToFloat(f32, y) + rand.uniformFloat()) / @intToFloat(f32, image_height - 1);
-                    const ray = world.camera.getRay(u, v);
-                    pixel_color += rayColor(&world, ray, max_depth);
-                }
-
-                image.items[y * image_width + x] = RGB8.init(pixel_color, samples_per_pixel);
-            }
-        }
-
         var buf: [32]u8 = undefined;
         const file_name = try std.fmt.bufPrintZ(buf[0..], "render_{d:0>2}.png", .{scene_idx + 1});
 
-        stb.stbi_flip_vertically_on_write(1);
-        _ = stb.stbi_write_png(
-            //"render.png",
-            file_name,
-            @intCast(c_int, image_width),
-            @intCast(c_int, image_height),
-            3,
-            @ptrCast(*const anyopaque, image.items),
-            @intCast(c_int, image_width * 3),
-        );
+        try renderSceneToPng(&world, file_name);
     }
 }
 
@@ -655,23 +719,23 @@ fn sceneBook1FinalRandom() World {
     while (a < 11) : (a += 1) {
         var b: isize = -11;
         while (b < 11) : (b += 1) {
-            const center = Vec3{ @intToFloat(f32, a) + 0.9 * rand.uniformFloat(), 0.2, @intToFloat(f32, b) + 0.9 * rand.uniformFloat() };
+            const center = Vec3{ @intToFloat(f32, a) + 0.9 * global_rand.uniformFloat(), 0.2, @intToFloat(f32, b) + 0.9 * global_rand.uniformFloat() };
 
             if (length(center - Vec3{ 4, 0.2, 0 }) > 0.9) {
-                const choose_mat = rand.uniformFloat();
+                const choose_mat = global_rand.uniformFloat();
 
                 if (choose_mat < 0.8) { // diffuse
                     const mat = world.addMaterial(.{
                         .lambertian = .{
-                            .albedo = rand.uniformVector() * rand.uniformVector(),
+                            .albedo = global_rand.uniformVector() * global_rand.uniformVector(),
                         },
                     });
                     world.addSphere(.{ .center = center, .radius = radius, .material = mat });
                 } else if (choose_mat < 0.95) { // metal
                     const mat = world.addMaterial(.{
                         .metal = .{
-                            .albedo = rand.uniformVectorInRange(0.5, 1.0),
-                            .fuzz = rand.uniformFloatInRange(0, 0.5),
+                            .albedo = global_rand.uniformVectorInRange(0.5, 1.0),
+                            .fuzz = global_rand.uniformFloatInRange(0, 0.5),
                         },
                     });
                     world.addSphere(.{ .center = center, .radius = radius, .material = mat });
