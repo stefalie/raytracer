@@ -75,8 +75,8 @@ const Rand = struct {
         return .{ .pcg = std.rand.Pcg.init(seed) };
     }
 
-    fn uniformInt(self: *Rand) u32 {
-        return self.pcg.random().int(u32);
+    fn uniformInt64(self: *Rand) u64 {
+        return self.pcg.random().int(u64);
     }
     fn uniformFloat(self: *Rand) f32 {
         return self.pcg.random().float(f32);
@@ -218,8 +218,8 @@ const Sphere = struct {
         rec.material = self.material;
         // Normalizing by dividing by radius is less precise than re-normalizing.
         //const outward_normal = (rec.pos - self.center) / scalar(self.radius);
-        const outward_normal = normalize(rec.pos - self.center);
-        std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-2);
+        const outward_normal = normalize(rec.pos - self.center) * scalar(if (self.radius >= 0.0) 1.0 else -1.0);
+        //std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-2);
         rec.setFaceNormal(r, outward_normal);
         return rec;
     }
@@ -504,12 +504,12 @@ fn renderThread(ctx: *RenderContext) void {
     std.debug.print("Thread {}: Done\n", .{std.Thread.getCurrentId()});
 }
 
-const image_width: usize = 1680; // 1680; // 400
-const samples_per_pixel: usize = 500; // 500; // 10
+const image_width: usize = 1680; // 400
+const samples_per_pixel: usize = 500; // 10
 const max_depth: usize = 50;
 const num_threads = 16;
 
-fn renderSceneToPng(world: *const World, file_name: [:0]u8) !void {
+fn renderSceneToPng(world: *const World, file_name: [:0]const u8) !void {
     var fb = Framebuffer.init(image_width, world.camera.aspect_ratio);
     defer fb.deinit();
 
@@ -521,7 +521,7 @@ fn renderSceneToPng(world: *const World, file_name: [:0]u8) !void {
         threads[i] = RenderContext{
             .framebuffer = fb,
             .world = world,
-            .rand = Rand.init(global_rand.uniformInt()),
+            .rand = Rand.init(global_rand.uniformInt64()),
             .y_start = i * num_lines_per_thread,
             .y_end = std.math.min((i + 1) * num_lines_per_thread, fb.height),
             .thread = try std.Thread.spawn(.{}, renderThread, .{&threads[i]}),
@@ -544,24 +544,26 @@ fn renderSceneToPng(world: *const World, file_name: [:0]u8) !void {
 }
 
 pub fn main() !void {
-    const scenes = [_]fn () World{
-        sceneInitialGrey,
-        sceneFuzzedMetal,
-        sceneDieletricHollow,
-        sceneDieletricHollowNewPerspective,
-        sceneBook1FinalRandom,
+    // TODO: Why does zig have nothing to reflect the name of a function?
+    const SceneRender = struct {
+        fun: fn () World,
+        file_name: [:0]const u8,
+    };
+    const scenes = [_]SceneRender{
+        .{ .fun = sceneInitialGrey, .file_name = "01_initial_gray.png" },
+        .{ .fun = sceneFuzzedMetal, .file_name = "02_fuzzed_metal.png" },
+        .{ .fun = sceneDieletricHollow, .file_name = "03_dielectric_hollow.png" },
+        .{ .fun = sceneDieletricHollowNewPerspective, .file_name = "04_dielectric_hollow_new_perspective.png" },
+        .{ .fun = sceneBook1FinalRandom, .file_name = "05_book1_final_random.png" },
     };
 
-    for (scenes) |scene_func, scene_idx| {
-        std.debug.print("Render scene: {}\n", .{scene_idx + 1});
+    for (scenes) |scene| {
+        std.debug.print("\nRender scene: {s}\n", .{scene.file_name});
 
-        var world = scene_func();
+        var world = scene.fun();
         defer world.deinit();
 
-        var buf: [32]u8 = undefined;
-        const file_name = try std.fmt.bufPrintZ(buf[0..], "render_{d:0>2}.png", .{scene_idx + 1});
-
-        try renderSceneToPng(&world, file_name);
+        try renderSceneToPng(&world, scene.file_name);
     }
 }
 
