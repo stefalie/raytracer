@@ -137,11 +137,7 @@ const Rand = struct {
 
     // normal needs to be normalized
     fn cosineWeightedHemisphere(self: *Rand, normal: Vec3) Vec3 {
-        // NOTE: If we renormalize the normal Sphere.hit we can use a threshold
-        // of 1e-2. If it's done via  (hit_pos - sphere_pos) / radius, the threshold
-        // needs to be even lower.
-        //std.debug.assert(@fabs(length(normal) - 1.0) < 1.0e-2);
-
+        std.debug.assert(@fabs(length(normal) - 1.0) < 1.0e-6);
         // This is cosine weighted importance sampling of the direction.
         // (See: https://twitter.com/mmalex/status/1550765798263758848)
         return normal + self.uniformUnitVector();
@@ -201,16 +197,48 @@ const Sphere = struct {
         if (discriminant < 0.0) {
             return null;
         }
-
         const sqrtd = @sqrt(discriminant);
+
+        // Stable quadratic equation solving.
+        // See:
+        // https://math.stackexchange.com/questions/866331/numerically-stable-algorithm-for-solving-the-quadratic-equation-when-a-is-very
+        //
+        // A few notes on the particular case of sphere <-> ray intersection:
+        // - we only want positive roots
+        // - a is always > 0
+        // - if b < 0 (the sphere center is behind the origin)
+        //   there is at most one positive root
+        //   if it exists it's the larger root
+        // - c can be zero when the origin of the ray is on the sphere
+        //   (that can happen when two spheres touch)
+        // - it can happen that both c and b == 0
+        //   I think that is the case when two spheres overlap
+        //   and the ray is tangential to the sphere we intersect against
+        // - with the classical solution for the roots the version
+        //   with - is always smaller than the version with +
+
         const b_ge_zero = half_b >= 0.0;
+        const b_c_eq_zero = c == 0.0 and half_b == 0.0; // Can lead to NaN
+
         var root = if (b_ge_zero) (-half_b - sqrtd) / a else c / (-half_b + sqrtd);
-        if (root < t_min or root > t_max) {
-            root = if (b_ge_zero) c / (-half_b - sqrtd) else (-half_b + sqrtd) / a;
-            if (root < t_min or root > t_max) {
+        if (root < t_min or root >= t_max) {
+            root = if (b_ge_zero and !b_c_eq_zero) c / (-half_b - sqrtd) else (-half_b + sqrtd) / a;
+            if (root < t_min or root >= t_max) {
                 return null;
             }
         }
+
+        // This is way simpler, but it's less precise.
+        //var root = (-half_b - sqrtd) / a;
+        //if (root < t_min or root >= t_max) {
+        //    root = (-half_b + sqrtd) / a;
+        //    if (root < t_min or root >= t_max) {
+        //        return null;
+        //    }
+        //}
+
+        // TODO: Should I the less precise expression but use f64?
+        // It can't cause NaN.
 
         var rec: HitRecord = undefined;
         rec.t = root;
@@ -219,7 +247,7 @@ const Sphere = struct {
         // Normalizing by dividing by radius is less precise than re-normalizing.
         //const outward_normal = (rec.pos - self.center) / scalar(self.radius);
         const outward_normal = normalize(rec.pos - self.center) * scalar(if (self.radius >= 0.0) 1.0 else -1.0);
-        //std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-2);
+        std.debug.assert(@fabs(length(outward_normal) - 1.0) < 1.0e-6);
         rec.setFaceNormal(r, outward_normal);
         return rec;
     }
@@ -237,7 +265,7 @@ const World = struct {
             .materials = std.ArrayList(Material).init(gpa),
         };
     }
-    pub fn deinit(self: World) void {
+    pub fn deinit(self: *World) void {
         self.spheres.deinit();
         self.materials.deinit();
     }
@@ -269,8 +297,8 @@ const Framebuffer = struct {
     height: usize,
     image: std.ArrayList(RGB8),
 
-    pub fn init(width: usize, aspect_ratio: f32) Framebuffer {
-        const height = @floatToInt(usize, @intToFloat(f32, width) / aspect_ratio);
+    pub fn init(height: usize, aspect_ratio: f32) Framebuffer {
+        const width = @floatToInt(usize, @intToFloat(f32, height) * aspect_ratio);
         var img = std.ArrayList(RGB8).init(gpa);
         img.resize(width * height) catch unreachable;
         return .{
@@ -464,72 +492,129 @@ fn rayColor(world: *const World, r: Ray, depth: isize, rand: *Rand) Color {
     }
 }
 
-const RenderContext = struct {
+const RenderCon = struct {
     framebuffer: Framebuffer,
     world: *const World,
-    rand: Rand,
-
+};
+const RenderChunk = struct {
+    rand: Rand, // Makes it deterministic as long as the chunk size stays the same.
     y_start: usize,
     y_end: usize,
-    thread: std.Thread,
 };
 
-fn renderThread(ctx: *RenderContext) void {
-    const img_width = ctx.framebuffer.width;
-    const img_height = ctx.framebuffer.height;
+const RenderChunkQueue = struct {
+    next_chunk_idx: std.atomic.Atomic(u32),
+    chunks: std.ArrayList(RenderChunk),
 
-    var y: usize = ctx.y_start;
-    while (y < ctx.y_end) : (y += 1) {
-        const remaining_lines = ctx.y_end - y;
-        if (remaining_lines % 10 == 0) {
-            std.debug.print("Thread {}: Remaining scanlines: {}\n", .{ std.Thread.getCurrentId(), remaining_lines });
-        }
-
-        var x: usize = 0;
-        while (x < img_width) : (x += 1) {
-            var pixel_color = zero;
-
-            var i: usize = 0;
-            while (i < samples_per_pixel) : (i += 1) {
-                const u = (@intToFloat(f32, x) + ctx.rand.uniformFloat()) / @intToFloat(f32, img_width - 1);
-                const v = (@intToFloat(f32, y) + ctx.rand.uniformFloat()) / @intToFloat(f32, img_height - 1);
-                const ray = ctx.world.camera.getRay(u, v, &ctx.rand);
-                pixel_color += rayColor(ctx.world, ray, max_depth, &ctx.rand);
-            }
-
-            ctx.framebuffer.setPixel(x, y, RGB8.init(pixel_color, samples_per_pixel));
-        }
-    }
-
-    std.debug.print("Thread {}: Done\n", .{std.Thread.getCurrentId()});
-}
-
-const image_width: usize = 1680; // 400
-const samples_per_pixel: usize = 500; // 10
-const max_depth: usize = 50;
-const num_threads = 16;
-
-fn renderSceneToPng(world: *const World, file_name: [:0]const u8) !void {
-    var fb = Framebuffer.init(image_width, world.camera.aspect_ratio);
-    defer fb.deinit();
-
-    var threads: [num_threads]RenderContext = undefined;
-    const num_lines_per_thread = (fb.height + num_threads - 1) / num_threads;
-
-    var i: usize = 0;
-    while (i < num_threads) : (i += 1) {
-        threads[i] = RenderContext{
-            .framebuffer = fb,
-            .world = world,
-            .rand = Rand.init(global_rand.uniformInt64()),
-            .y_start = i * num_lines_per_thread,
-            .y_end = std.math.min((i + 1) * num_lines_per_thread, fb.height),
-            .thread = try std.Thread.spawn(.{}, renderThread, .{&threads[i]}),
+    pub fn init() RenderChunkQueue {
+        return .{
+            .next_chunk_idx = std.atomic.Atomic(u32).init(0),
+            .chunks = std.ArrayList(RenderChunk).init(gpa),
         };
     }
+    pub fn deinit(self: RenderChunkQueue) void {
+        self.chunks.deinit();
+    }
+};
 
-    for (threads) |ctx| {
-        ctx.thread.join();
+fn renderThread(
+    framebuffer: Framebuffer,
+    world: *const World,
+    queue: *RenderChunkQueue,
+) void {
+    const img_width = framebuffer.width;
+    const img_height = framebuffer.height;
+
+    while (true) {
+        const chunk_idx = queue.next_chunk_idx.fetchAdd(1, .AcqRel);
+        if (chunk_idx >= queue.chunks.items.len) {
+            break;
+        }
+
+        std.debug.print("Thread {}:\tStarting chunk {}\n", .{ std.Thread.getCurrentId(), chunk_idx });
+        var chunk = queue.chunks.items[chunk_idx];
+
+        var y: usize = chunk.y_start;
+        while (y < chunk.y_end) : (y += 1) {
+            var x: usize = 0;
+            while (x < img_width) : (x += 1) {
+                var pixel_color = zero;
+
+                var i: usize = 0;
+                while (i < cfg.samples_per_pixel) : (i += 1) {
+                    const u = (@intToFloat(f32, x) + chunk.rand.uniformFloat()) / @intToFloat(f32, img_width); // I think the book wrongly does -1 in the dividend.
+                    const v = (@intToFloat(f32, y) + chunk.rand.uniformFloat()) / @intToFloat(f32, img_height);
+
+                    const ray = world.camera.getRay(u, v, &chunk.rand);
+                    pixel_color += rayColor(world, ray, cfg.max_depth, &chunk.rand);
+                }
+
+                framebuffer.setPixel(x, y, RGB8.init(pixel_color, cfg.samples_per_pixel));
+            }
+        }
+    }
+
+    std.debug.print("Thread {}:\tDone\n", .{std.Thread.getCurrentId()});
+}
+
+const Quality = enum {
+    quicky,
+    preview,
+    fhd,
+};
+
+const quality = Quality.fhd;
+const num_threads = 16;
+const scanlines_per_chunk = 8;
+
+const Config = struct {
+    image_height: usize,
+    samples_per_pixel: usize,
+    max_depth: usize,
+};
+const cfg: Config = switch (quality) {
+    .quicky => .{
+        .image_height = 225,
+        .samples_per_pixel = 1,
+        .max_depth = 10,
+    },
+    .preview => .{
+        .image_height = 225,
+        .samples_per_pixel = 100,
+        .max_depth = 50,
+    },
+    .fhd => .{
+        .image_height = 1080,
+        .samples_per_pixel = 500,
+        .max_depth = 50,
+    },
+};
+
+fn renderSceneToPng(world: *const World, file_name: [:0]const u8) !void {
+    var fb = Framebuffer.init(cfg.image_height, world.camera.aspect_ratio);
+    defer fb.deinit();
+
+    var queue = RenderChunkQueue.init();
+    defer queue.deinit();
+
+    var line: usize = 0;
+    while (line < fb.height) : (line += scanlines_per_chunk) {
+        try queue.chunks.append(.{
+            .rand = Rand.init(global_rand.uniformInt64()),
+            .y_start = line,
+            .y_end = std.math.min(line + scanlines_per_chunk, fb.height),
+        });
+    }
+
+    // Run threads.
+    var threads: [num_threads]std.Thread = undefined;
+
+    for (threads) |_, i| {
+        threads[i] = try std.Thread.spawn(.{}, renderThread, .{ fb, world, &queue });
+    }
+
+    for (threads) |thread| {
+        thread.join();
     }
 
     stb.stbi_flip_vertically_on_write(1);
@@ -544,7 +629,7 @@ fn renderSceneToPng(world: *const World, file_name: [:0]const u8) !void {
 }
 
 pub fn main() !void {
-    // TODO: Why does zig have nothing to reflect the name of a function?
+    // TODO: Does zig not have anything to reflect the name of a function?
     const SceneRender = struct {
         fun: fn () World,
         file_name: [:0]const u8,
