@@ -531,7 +531,7 @@ fn renderThread(
             break;
         }
 
-        std.debug.print("Thread {}:\tStarting chunk {}\n", .{ std.Thread.getCurrentId(), chunk_idx });
+        std.debug.print("Thread {d: >5}:\tStarting chunk {d: >3}\n", .{ std.Thread.getCurrentId(), chunk_idx });
         var chunk = queue.chunks.items[chunk_idx];
 
         var y: usize = chunk.y_start;
